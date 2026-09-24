@@ -2,4 +2,6 @@ bin/
 *.exe
 .env
 local.env
-README.md
+# 本机备忘：生产 SSH 信息与 Bot AppSecret，绝不入库
+local-notes.md
+README.local.md
