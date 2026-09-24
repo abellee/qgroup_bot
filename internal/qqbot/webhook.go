@@ -89,7 +89,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		h.log.Info("address verification without signature headers", "event_ts", env.T)
+		h.log.Info("address verification arriving without signature headers")
 	}
 
 	switch env.Op {

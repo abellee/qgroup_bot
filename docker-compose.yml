@@ -1,0 +1,22 @@
+services:
+  qgroup-bot:
+    image: ghcr.io/abellee/qgroup-bot:0.1.1
+    container_name: qgroup-bot
+    # Host networking like the other services here: OpenResty is also on the
+    # host namespace, so it can proxy straight to 127.0.0.1:8092.
+    network_mode: host
+    env_file: .env
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8092/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
