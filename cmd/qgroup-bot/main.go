@@ -15,6 +15,9 @@ import (
 	"qgroup-bot/internal/sub2api"
 )
 
+// version is stamped by the image build via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
@@ -48,6 +51,10 @@ func run() error {
 	// is expected to terminate in front of this listener.
 	mux := http.NewServeMux()
 	mux.Handle("/qq/callback", handler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -59,7 +66,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr, "route", "/qq/callback", "managed_groups", len(cfg.AllowedGroups))
+		log.Info("listening", "version", version, "addr", cfg.ListenAddr, "route", "/qq/callback", "managed_groups", len(cfg.AllowedGroups))
 		errCh <- srv.ListenAndServe()
 	}()
 

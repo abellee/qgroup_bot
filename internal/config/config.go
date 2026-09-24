@@ -31,7 +31,9 @@ type Config struct {
 
 func Load() (*Config, error) {
 	c := &Config{
-		ListenAddr:      env("QGB_LISTEN_ADDR", ":8080"),
+		// Loopback only: TLS and the public host name terminate in the
+		// front OpenResty vhost (qbot.tokenfree.dev), which proxies here.
+		ListenAddr:      env("QGB_LISTEN_ADDR", "127.0.0.1:8092"),
 		ReadTimeout:     envDuration("QGB_READ_TIMEOUT", 10*time.Second),
 		MaxSkew:         envDuration("QGB_MAX_SKEW", 5*time.Minute),
 		AppID:           os.Getenv("QGB_QQ_APP_ID"),

@@ -1,0 +1,11 @@
+.git
+.github
+.dockerignore
+Dockerfile
+bin/
+*.exe
+*.log
+.env
+local.env
+local-notes.md
+README.local.md
