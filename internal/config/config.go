@@ -25,8 +25,8 @@ type Config struct {
 
 	AllowedGroups map[string]struct{}
 
-	// Welcome is the markdown announced in the group after an approval; empty
-	// means no announcement is made.
+	// Welcome is the markdown announced in the group once a newly approved
+	// member speaks; empty means no announcement is made.
 	Welcome  string
 	Upstream time.Duration
 }

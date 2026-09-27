@@ -26,7 +26,12 @@ func quietLogger() *slog.Logger {
 
 func newTestHandler(t *testing.T, fn JoinHandler) *Handler {
 	t.Helper()
-	h, err := NewHandler(docAppID, docAppSecret, 5*time.Minute, 8, fn, quietLogger())
+	return newTestHandlers(t, fn, func(context.Context, *GroupMessageEvent) {})
+}
+
+func newTestHandlers(t *testing.T, onJoin JoinHandler, onMessage MessageHandler) *Handler {
+	t.Helper()
+	h, err := NewHandler(docAppID, docAppSecret, 5*time.Minute, 8, onJoin, onMessage, quietLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +131,72 @@ func TestHandlerDispatchRequiresValidSignature(t *testing.T) {
 			t.Fatalf("status = %d, want 401", rr.Code)
 		}
 	})
+}
+
+// A group message push has to reach the message handler with the two fields a
+// reply is built from: the message id and the sender's member openid.
+func TestHandlerRoutesGroupMessage(t *testing.T) {
+	var mu sync.Mutex
+	var joins int
+	var seen []*GroupMessageEvent
+	h := newTestHandlers(t,
+		func(context.Context, *JoinRequestEvent) {
+			mu.Lock()
+			joins++
+			mu.Unlock()
+		},
+		func(_ context.Context, ev *GroupMessageEvent) {
+			mu.Lock()
+			seen = append(seen, ev)
+			mu.Unlock()
+		})
+	h.Start(context.Background())
+
+	const msgBody = `{"id":"evt-9","op":0,"s":9,"t":"GROUP_AT_MESSAGE_CREATE","d":` +
+		`{"id":"ROBOT1.0_abc","timestamp":"2026-09-27T19:09:12+08:00","group_openid":"g1",` +
+		`"content":"有人吗","message_type":0,"author":{"member_openid":"m1","username":"新人"}}}`
+
+	kp, err := NewKeyPair(docAppSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	req := httptest.NewRequest("POST", "/qq/callback", strings.NewReader(msgBody))
+	req.Header.Set("X-Bot-Appid", docAppID)
+	req.Header.Set("X-Signature-Timestamp", ts)
+	req.Header.Set("X-Signature-Ed25519", kp.Sign([]byte(ts+msgBody)))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if joins != 0 {
+		t.Errorf("join handler called %d times for a message event", joins)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("message handler calls = %d, want 1", len(seen))
+	}
+	ev := seen[0]
+	if ev.ID != "ROBOT1.0_abc" || ev.GroupOpenID != "g1" || ev.Author.MemberOpenID != "m1" {
+		t.Errorf("decoded message event = %+v, want the reply id, group and sender", ev)
+	}
+	if !strings.Contains(string(ev.Raw), "有人吗") {
+		t.Errorf("raw body = %q, want the untouched event", string(ev.Raw))
+	}
 }
 
 func TestHandlerRejectsOtherMethods(t *testing.T) {

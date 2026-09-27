@@ -14,6 +14,15 @@ const (
 // EventGroupJoinRequest is the envelope `t` value for a user applying to join a group.
 const EventGroupJoinRequest = "GROUP_JOIN_REQUEST"
 
+// The two shapes of a pushed group message. `GROUP_AT_MESSAGE_CREATE` fires only
+// when a member addresses the bot; `GROUP_MESSAGE_CREATE` is the full-traffic
+// mode and needs the app to have 接收所有消息 enabled. Both carry the message id
+// that a reply is built on.
+const (
+	EventGroupAtMessageCreate = "GROUP_AT_MESSAGE_CREATE"
+	EventGroupMessageCreate   = "GROUP_MESSAGE_CREATE"
+)
+
 type Envelope struct {
 	ID string          `json:"id"`
 	Op int             `json:"op"`
@@ -62,9 +71,30 @@ type JoinRequestEvent struct {
 	Raw json.RawMessage `json:"-"`
 
 	// EventID is the dispatch envelope's `id`, filled in by the webhook layer.
-	// The group message endpoint rejects sends that carry no reply credential,
-	// so this is what lets a welcome note answer the join event.
+	// It is log correlation only: a join event cannot be replied to, which is
+	// why the welcome note waits for one of the member's messages instead.
 	EventID string `json:"-"`
+}
+
+// GroupMessageEvent is the `d` of either pushed group message event.
+type GroupMessageEvent struct {
+	// ID is the message id the send endpoint accepts as `msg_id`. It is the
+	// only reply credential this app can obtain in a group, and it expires
+	// five minutes after the message.
+	ID          string `json:"id"`
+	Timestamp   string `json:"timestamp"`
+	GroupOpenID string `json:"group_openid"`
+	Content     string `json:"content"`
+	MessageType int    `json:"message_type"`
+	Author      struct {
+		ID           string `json:"id"`
+		Username     string `json:"username"`
+		MemberOpenID string `json:"member_openid"`
+	} `json:"author"`
+
+	// Raw keeps the untouched body, so fields the docs do not list stay
+	// discoverable in the logs while the event shape is confirmed live.
+	Raw json.RawMessage `json:"-"`
 }
 
 const (

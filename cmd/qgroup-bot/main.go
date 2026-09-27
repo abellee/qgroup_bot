@@ -41,7 +41,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	handler, err := qqbot.NewHandler(cfg.AppID, cfg.AppSecret, cfg.MaxSkew, 128, svc.HandleJoin, log)
+	handler, err := qqbot.NewHandler(cfg.AppID, cfg.AppSecret, cfg.MaxSkew, 128, svc.HandleJoin, svc.HandleGroupMessage, log)
 	if err != nil {
 		return err
 	}

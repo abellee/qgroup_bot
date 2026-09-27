@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"qgroup-bot/internal/qqbot"
 )
@@ -46,10 +47,10 @@ type reviewCall struct {
 }
 
 type sendCall struct {
-	Group    string
-	EventID  string
-	MsgType  int
-	Content  string
+	Group   string
+	MsgID   string
+	MsgType int
+	Content string
 }
 
 // qqStub serves the open API endpoints this service uses and records every
@@ -93,7 +94,7 @@ func (s *qqStub) newClient(t *testing.T) *qqbot.Client {
 				t.Errorf("unexpected send path %q", r.URL.Path)
 			}
 			var body struct {
-				EventID  string `json:"event_id"`
+				MsgID    string `json:"msg_id"`
 				MsgType  int    `json:"msg_type"`
 				Markdown struct {
 					Content string `json:"content"`
@@ -101,7 +102,7 @@ func (s *qqStub) newClient(t *testing.T) *qqbot.Client {
 			}
 			json.NewDecoder(r.Body).Decode(&body)
 			s.sends = append(s.sends, sendCall{
-				Group: parts[2], EventID: body.EventID, MsgType: body.MsgType, Content: body.Markdown.Content,
+				Group: parts[2], MsgID: body.MsgID, MsgType: body.MsgType, Content: body.Markdown.Content,
 			})
 			if s.failSend {
 				io.WriteString(w, `{"code":301202,"message":"小程序appid不匹配"}`)
@@ -151,6 +152,34 @@ func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestE
 	}
 }
 
+// msgEvent is one pushed group message from `member`, carrying the id a reply
+// would be anchored to.
+func msgEvent(group, member, msgID string) *qqbot.GroupMessageEvent {
+	ev := &qqbot.GroupMessageEvent{
+		ID:          msgID,
+		GroupOpenID: group,
+		Content:     "有人吗",
+	}
+	ev.Author.MemberOpenID = member
+	return ev
+}
+
+func welcomesPending(svc *Service) int {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	return len(svc.expected)
+}
+
+// expireWelcomes backdates every pending welcome, standing in for the wait
+// before a member who joined and only speaks much later.
+func expireWelcomes(svc *Service) {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	for key := range svc.expected {
+		svc.expected[key] = time.Now().Add(-time.Minute)
+	}
+}
+
 // Only a registered email gets an approval; everything else must stay silent,
 // because the bot no longer declines anything.
 func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
@@ -185,28 +214,32 @@ func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	}
 }
 
-// The welcome note follows a successful approval and nothing else.
-func TestWelcomeMarkdownFollowsApproval(t *testing.T) {
+// An approval only registers the newcomer; the note goes out with their own
+// first message, because that is the only event carrying a reply credential the
+// platform accepts.
+func TestWelcomeFollowsTheFirstMessageAfterApproval(t *testing.T) {
 	const welcome = "## 欢迎\n\n请阅读群公告"
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, welcome, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
-	svc.HandleJoin(context.Background(), qaEvent("g1", "m2", "jr2", "请填写注册邮箱", "stranger@other.com"))
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m9", "msg-other"))
+	if got := len(stub.announced()); got != 0 {
+		t.Fatalf("welcome sends before the newcomer speaks = %d, want none", got)
+	}
 
-	if len(stub.reviewed()) != 1 {
-		t.Fatalf("review calls = %+v, want one approval", stub.reviewed())
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-1"))
+	sent := stub.announced()
+	if len(sent) != 1 {
+		t.Fatalf("welcome sends = %+v, want one", sent)
 	}
-	if len(stub.announced()) != 1 {
-		t.Fatalf("welcome sends = %+v, want one", stub.announced())
-	}
-	s := stub.announced()[0]
+	s := sent[0]
 	if s.Group != "g1" {
 		t.Errorf("welcome went to group %q, want g1", s.Group)
 	}
-	if s.EventID != "evt-jr1" {
-		t.Errorf("event_id = %q, want evt-jr1 (the endpoint rejects a send with no reply credential)", s.EventID)
+	if s.MsgID != "msg-1" {
+		t.Errorf("msg_id = %q, want msg-1 (a send with no reply credential is refused)", s.MsgID)
 	}
 	if s.MsgType != 2 {
 		t.Errorf("msg_type = %d, want 2 for a markdown message", s.MsgType)
@@ -214,39 +247,49 @@ func TestWelcomeMarkdownFollowsApproval(t *testing.T) {
 	if s.Content != welcome {
 		t.Errorf("markdown content = %q, want %q", s.Content, welcome)
 	}
-}
 
-// Without an event to answer there is nothing to send on; the approval stands.
-func TestWelcomeWithoutEventIDKeepsTheApproval(t *testing.T) {
-	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
-
-	ev := qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com")
-	ev.EventID = ""
-	svc.HandleJoin(context.Background(), ev)
-
-	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
-		t.Errorf("review calls = %+v, want the approval to stand", stub.reviewed())
-	}
-	if len(stub.announced()) != 0 {
-		t.Errorf("welcome sends = %+v, want none without a reply credential", stub.announced())
+	// One welcome per approval, not one per message.
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-2"))
+	if got := len(stub.announced()); got != 1 {
+		t.Errorf("welcome sends = %+v, want the newcomer announced once", stub.announced())
 	}
 }
 
-// A welcome that the platform refuses must not undo or repeat the approval.
+// The approval itself is what survives a refused send, not the announcement.
 func TestWelcomeFailureKeepsTheApproval(t *testing.T) {
 	stub := &qqStub{failSend: true}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-1"))
 
 	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
 		t.Errorf("review calls = %+v, want the approval to stand", stub.reviewed())
 	}
 	if len(stub.announced()) != 1 {
 		t.Errorf("welcome sends = %+v, want the one failed attempt", stub.announced())
+	}
+}
+
+// Nobody is announced without an approval, and nothing is announced while the
+// copy is empty.
+func TestWelcomeOnlyForApprovedMembers(t *testing.T) {
+	stub := &qqStub{}
+	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
+
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m5", "msg-a"))
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "", "msg-b"))
+	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
+	if got := welcomesPending(svc); got != 1 {
+		t.Fatalf("welcomes pending = %d, want the one approval", got)
+	}
+	// The window passing drops the entry instead of announcing later.
+	expireWelcomes(svc)
+	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-c"))
+	if len(stub.announced()) != 0 {
+		t.Errorf("welcome sends = %+v, want none for an unapproved or expired member", stub.announced())
 	}
 }
 

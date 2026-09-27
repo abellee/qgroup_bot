@@ -16,16 +16,22 @@ const maxBodyBytes = 1 << 20
 // platform gets its ACK inside the callback timeout even when sub2api is slow.
 type JoinHandler func(ctx context.Context, ev *JoinRequestEvent)
 
+// MessageHandler consumes a decoded group message, which is where a reply to a
+// member is anchored.
+type MessageHandler func(ctx context.Context, ev *GroupMessageEvent)
+
 type Handler struct {
-	keys    *KeyPair
-	appID   string
-	maxSkew time.Duration
-	onJoin  JoinHandler
-	log     *slog.Logger
-	queue   chan *JoinRequestEvent
+	keys      *KeyPair
+	appID     string
+	maxSkew   time.Duration
+	onJoin    JoinHandler
+	onMessage MessageHandler
+	log       *slog.Logger
+	queue     chan *JoinRequestEvent
+	msgQueue  chan *GroupMessageEvent
 }
 
-func NewHandler(appID, botSecret string, maxSkew time.Duration, queueSize int, onJoin JoinHandler, log *slog.Logger) (*Handler, error) {
+func NewHandler(appID, botSecret string, maxSkew time.Duration, queueSize int, onJoin JoinHandler, onMessage MessageHandler, log *slog.Logger) (*Handler, error) {
 	keys, err := NewKeyPair(botSecret)
 	if err != nil {
 		return nil, err
@@ -34,17 +40,20 @@ func NewHandler(appID, botSecret string, maxSkew time.Duration, queueSize int, o
 		queueSize = 128
 	}
 	return &Handler{
-		keys:    keys,
-		appID:   appID,
-		maxSkew: maxSkew,
-		onJoin:  onJoin,
-		log:     log,
-		queue:   make(chan *JoinRequestEvent, queueSize),
+		keys:      keys,
+		appID:     appID,
+		maxSkew:   maxSkew,
+		onJoin:    onJoin,
+		onMessage: onMessage,
+		log:       log,
+		queue:     make(chan *JoinRequestEvent, queueSize),
+		msgQueue:  make(chan *GroupMessageEvent, queueSize),
 	}, nil
 }
 
-// Start runs the single worker draining join requests. One worker keeps
-// approvals ordered per process and is plenty for a 60 QPM endpoint.
+// Start runs the single worker draining both queues. One worker keeps events in
+// the order the platform sent them, which matters because a newcomer who posts
+// straight away must not be handled before the approval registered their welcome.
 func (h *Handler) Start(ctx context.Context) {
 	go func() {
 		for {
@@ -53,6 +62,8 @@ func (h *Handler) Start(ctx context.Context) {
 				return
 			case ev := <-h.queue:
 				h.onJoin(ctx, ev)
+			case ev := <-h.msgQueue:
+				h.onMessage(ctx, ev)
 			}
 		}
 	}()
@@ -123,22 +134,40 @@ func (h *Handler) handleValidation(w http.ResponseWriter, env Envelope) {
 func (h *Handler) handleDispatch(w http.ResponseWriter, env Envelope) {
 	writeJSON(w, http.StatusOK, map[string]any{"op": OpCallbackACK})
 
-	if env.T != EventGroupJoinRequest {
-		h.log.Debug("unhandled event", "t", env.T, "id", env.ID)
-		return
-	}
-	var ev JoinRequestEvent
-	if err := json.Unmarshal(env.D, &ev); err != nil {
-		h.log.Warn("bad join request event", "id", env.ID, "error", err)
-		return
-	}
-	ev.Raw = env.D
-	ev.EventID = env.ID
-	select {
-	case h.queue <- &ev:
+	switch env.T {
+	case EventGroupJoinRequest:
+		var ev JoinRequestEvent
+		if err := json.Unmarshal(env.D, &ev); err != nil {
+			h.log.Warn("bad join request event", "id", env.ID, "error", err)
+			return
+		}
+		ev.Raw = env.D
+		ev.EventID = env.ID
+		select {
+		case h.queue <- &ev:
+		default:
+			h.log.Error("join queue full, leaving request for manual review",
+				"join_request_id", ev.JoinRequestID, "group_openid", ev.GroupOpenID)
+		}
+
+	case EventGroupAtMessageCreate, EventGroupMessageCreate:
+		var ev GroupMessageEvent
+		if err := json.Unmarshal(env.D, &ev); err != nil {
+			h.log.Warn("bad group message event", "t", env.T, "id", env.ID, "error", err)
+			return
+		}
+		ev.Raw = env.D
+		select {
+		case h.msgQueue <- &ev:
+		default:
+			h.log.Error("message queue full, dropping group message",
+				"t", env.T, "msg_id", ev.ID, "group_openid", ev.GroupOpenID)
+		}
+
 	default:
-		h.log.Error("join queue full, leaving request for manual review",
-			"join_request_id", ev.JoinRequestID, "group_openid", ev.GroupOpenID)
+		// Logged at info rather than debug because which event types the app is
+		// actually subscribed to is only visible on the wire.
+		h.log.Info("ignored event", "t", env.T, "id", env.ID)
 	}
 }
 

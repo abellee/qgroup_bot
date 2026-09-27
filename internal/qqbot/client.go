@@ -132,16 +132,17 @@ func (c *Client) ApproveJoin(ctx context.Context, ev *JoinRequestEvent) error {
 	return nil
 }
 
-// SendGroupMarkdown posts a markdown message to a group in reply to one of its
-// events: the endpoint refuses a send that carries no reply credential
-// (40034105), so eventID comes from the dispatch envelope of the join request
-// that triggered this. The platform allows the reply for five minutes.
-func (c *Client) SendGroupMarkdown(ctx context.Context, groupOpenID, eventID, markdown string) error {
+// ReplyGroupMarkdown posts a markdown message into a group as the answer to one
+// of its messages. A reply credential is mandatory - the endpoint refuses a
+// credential-less send with 40034105 (主动消息发送失败，无权限) - and only a
+// message event supplies one that the platform accepts, since replying to a
+// join request is rejected outright with 40034027.
+func (c *Client) ReplyGroupMarkdown(ctx context.Context, groupOpenID, msgID, markdown string) error {
 	if groupOpenID == "" {
 		return fmt.Errorf("event is missing group_openid")
 	}
-	if eventID == "" {
-		return fmt.Errorf("event is missing an envelope id to reply to")
+	if msgID == "" {
+		return fmt.Errorf("event is missing a message id to reply to")
 	}
 	token, err := c.accessToken(ctx)
 	if err != nil {
@@ -150,7 +151,7 @@ func (c *Client) SendGroupMarkdown(ctx context.Context, groupOpenID, eventID, ma
 
 	payload, err := json.Marshal(map[string]any{
 		"msg_type": 2,
-		"event_id": eventID,
+		"msg_id":   msgID,
 		"markdown": map[string]string{"content": markdown},
 	})
 	if err != nil {
@@ -166,7 +167,7 @@ func (c *Client) SendGroupMarkdown(ctx context.Context, groupOpenID, eventID, ma
 	req.Header.Set("Authorization", "QQBot "+token)
 
 	if err := c.do(req, nil); err != nil {
-		return fmt.Errorf("send group markdown: %w", err)
+		return fmt.Errorf("reply group markdown: %w", err)
 	}
 	return nil
 }
