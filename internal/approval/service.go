@@ -136,7 +136,7 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 // HandleGroupMessage announces a member who was approved moments ago. Only the
 // member's own message carries a reply credential the platform accepts, so that
 // is what the welcome is anchored to.
-func (s *Service) HandleGroupMessage(ctx context.Context, ev *GroupMessageEvent) {
+func (s *Service) HandleGroupMessage(ctx context.Context, ev *qqbot.GroupMessageEvent) {
 	member := ev.Author.MemberOpenID
 	logFields := []any{
 		"group_openid", ev.GroupOpenID,
