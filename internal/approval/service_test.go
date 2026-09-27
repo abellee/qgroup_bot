@@ -46,9 +46,10 @@ type reviewCall struct {
 }
 
 type sendCall struct {
-	Group   string
-	MsgType int
-	Content string
+	Group    string
+	EventID  string
+	MsgType  int
+	Content  string
 }
 
 // qqStub serves the open API endpoints this service uses and records every
@@ -92,13 +93,16 @@ func (s *qqStub) newClient(t *testing.T) *qqbot.Client {
 				t.Errorf("unexpected send path %q", r.URL.Path)
 			}
 			var body struct {
-				MsgType  int `json:"msg_type"`
+				EventID  string `json:"event_id"`
+				MsgType  int    `json:"msg_type"`
 				Markdown struct {
 					Content string `json:"content"`
 				} `json:"markdown"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
-			s.sends = append(s.sends, sendCall{Group: parts[2], MsgType: body.MsgType, Content: body.Markdown.Content})
+			s.sends = append(s.sends, sendCall{
+				Group: parts[2], EventID: body.EventID, MsgType: body.MsgType, Content: body.Markdown.Content,
+			})
 			if s.failSend {
 				io.WriteString(w, `{"code":301202,"message":"小程序appid不匹配"}`)
 				return
@@ -135,6 +139,7 @@ func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestE
 		GroupOpenID:   group,
 		MemberOpenID:  member,
 		JoinRequestID: joinID,
+		EventID:       "evt-" + joinID,
 		ApplySource:   qqbot.ApplySourceSelf,
 		VerifyInfo: qqbot.VerifyInfo{
 			Method: "admin_review_qa",
@@ -200,11 +205,32 @@ func TestWelcomeMarkdownFollowsApproval(t *testing.T) {
 	if s.Group != "g1" {
 		t.Errorf("welcome went to group %q, want g1", s.Group)
 	}
+	if s.EventID != "evt-jr1" {
+		t.Errorf("event_id = %q, want evt-jr1 (the endpoint rejects a send with no reply credential)", s.EventID)
+	}
 	if s.MsgType != 2 {
 		t.Errorf("msg_type = %d, want 2 for a markdown message", s.MsgType)
 	}
 	if s.Content != welcome {
 		t.Errorf("markdown content = %q, want %q", s.Content, welcome)
+	}
+}
+
+// Without an event to answer there is nothing to send on; the approval stands.
+func TestWelcomeWithoutEventIDKeepsTheApproval(t *testing.T) {
+	stub := &qqStub{}
+	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
+
+	ev := qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com")
+	ev.EventID = ""
+	svc.HandleJoin(context.Background(), ev)
+
+	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
+		t.Errorf("review calls = %+v, want the approval to stand", stub.reviewed())
+	}
+	if len(stub.announced()) != 0 {
+		t.Errorf("welcome sends = %+v, want none without a reply credential", stub.announced())
 	}
 }
 

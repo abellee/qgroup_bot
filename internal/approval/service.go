@@ -48,6 +48,7 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	// are recovered during bootstrap.
 	s.log.Info("join request received",
 		"group_openid", ev.GroupOpenID,
+		"event_id", ev.EventID,
 		"member_openid", ev.MemberOpenID,
 		"union_openid", ev.UnionOpenID,
 		"username", ev.Username,
@@ -106,11 +107,12 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	// The applicant is already in the group, so a failed announcement is only
 	// worth logging; nothing about the approval changes.
 	if s.welcome != "" {
-		if err := s.qq.SendGroupMarkdown(ctx, ev.GroupOpenID, s.welcome); err != nil {
-			s.log.Error("welcome message send failed", append(logFields, "error", err)...)
+		if err := s.qq.SendGroupMarkdown(ctx, ev.GroupOpenID, ev.EventID, s.welcome); err != nil {
+			s.log.Error("welcome message send failed",
+				append(logFields, "event_id", ev.EventID, "error", err)...)
 			return
 		}
-		s.log.Info("welcome message sent", logFields...)
+		s.log.Info("welcome message sent", append(logFields, "event_id", ev.EventID)...)
 	}
 }
 

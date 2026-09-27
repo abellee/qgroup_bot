@@ -133,6 +133,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, env Envelope) {
 		return
 	}
 	ev.Raw = env.D
+	ev.EventID = env.ID
 	select {
 	case h.queue <- &ev:
 	default:

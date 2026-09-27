@@ -60,6 +60,11 @@ type JoinRequestEvent struct {
 	// documented field list has no plain QQ number, so keeping the original
 	// JSON is how an undocumented identity field stays discoverable in logs.
 	Raw json.RawMessage `json:"-"`
+
+	// EventID is the dispatch envelope's `id`, filled in by the webhook layer.
+	// The group message endpoint rejects sends that carry no reply credential,
+	// so this is what lets a welcome note answer the join event.
+	EventID string `json:"-"`
 }
 
 const (
