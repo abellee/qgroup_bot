@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -19,14 +18,17 @@ var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za
 // address is the same digits at @qq.com.
 var qqNumberPattern = regexp.MustCompile(`^[0-9]+$`)
 
+// Directory answers whether an address belongs to a registered account.
 type Directory interface {
 	UserExists(ctx context.Context, email string) (bool, error)
 }
 
-// welcomeWindow bounds how long after an approval a member's own message still
-// counts as a debut worth announcing. Past that the group has absorbed them and
-// a late welcome would read as a glitch.
-const welcomeWindow = time.Hour
+// Expecting hears about a member that was just approved. What happens next is
+// not the approver's business: today the only implementation announces them on
+// their first message, and a dialogue handler can register for the same signal.
+type Expecting interface {
+	Expect(groupOpenID, memberOpenID string)
+}
 
 // Service decides the fate of one join request: the answer given to the group's
 // verification question must be the email of a registered sub2api account.
@@ -34,33 +36,18 @@ const welcomeWindow = time.Hour
 // Approving is the only judgement made. Every other outcome - no email in the
 // answers, an unregistered email, a lookup that fails - leaves the request
 // pending for a human, and nothing is ever auto-rejected.
-//
-// The welcome note cannot be sent when the approval lands, because the platform
-// refuses a reply to a join event, so an approved member is remembered for
-// welcomeWindow and announced when their first group message arrives - the one
-// event that hands us a usable reply credential.
 type Service struct {
-	qq      *qqbot.Client
-	dir     Directory
-	groups  map[string]struct{}
-	welcome string
-	log     *slog.Logger
-
-	mu       sync.Mutex
-	expected map[string]time.Time
+	qq       *qqbot.Client
+	dir      Directory
+	groups   map[string]struct{}
+	welcomes Expecting
+	log      *slog.Logger
 }
 
-// NewService wires the approver. An empty welcome markdown leaves the group
-// announcement disabled, which is the safe default when the copy is not set.
-func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, welcome string, log *slog.Logger) *Service {
-	return &Service{
-		qq:       qq,
-		dir:      dir,
-		groups:   groups,
-		welcome:  welcome,
-		log:      log,
-		expected: map[string]time.Time{},
-	}
+// NewService wires the approver. welcomes must not be nil; a handler with
+// nothing to say is cheaper than a nil check on every approval.
+func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, welcomes Expecting, log *slog.Logger) *Service {
+	return &Service{qq: qq, dir: dir, groups: groups, welcomes: welcomes, log: log}
 }
 
 func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
@@ -125,71 +112,9 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	}
 	s.log.Info("join review", append(logFields, "action", "approve", "took", time.Since(start).String())...)
 
-	if s.welcome != "" && ev.MemberOpenID != "" {
-		s.expectWelcome(ev.GroupOpenID, ev.MemberOpenID)
-		// The join event itself cannot be replied to, so the note goes out with
-		// the member's own first message.
-		s.log.Info("welcome waiting for the first message", logFields...)
+	if ev.MemberOpenID != "" {
+		s.welcomes.Expect(ev.GroupOpenID, ev.MemberOpenID)
 	}
-}
-
-// HandleGroupMessage announces a member who was approved moments ago. Only the
-// member's own message carries a reply credential the platform accepts, so that
-// is what the welcome is anchored to.
-func (s *Service) HandleGroupMessage(ctx context.Context, ev *qqbot.GroupMessageEvent) {
-	member := ev.Author.MemberOpenID
-	logFields := []any{
-		"group_openid", ev.GroupOpenID,
-		"member_openid", member,
-		"msg_id", ev.ID,
-	}
-	s.log.Info("group message received", logFields...)
-
-	if s.welcome == "" || member == "" {
-		return
-	}
-	if !s.claimWelcome(ev.GroupOpenID, member) {
-		return
-	}
-	if err := s.qq.ReplyGroupMarkdown(ctx, ev.GroupOpenID, ev.ID, s.welcome); err != nil {
-		s.log.Error("welcome message send failed", append(logFields, "error", err)...)
-		return
-	}
-	s.log.Info("welcome message sent", logFields...)
-}
-
-func welcomeKey(groupOpenID, memberOpenID string) string {
-	return groupOpenID + "\x00" + memberOpenID
-}
-
-// expectWelcome marks a freshly approved member, dropping entries whose window
-// has passed so a member who never posts cannot accumulate here.
-func (s *Service) expectWelcome(groupOpenID, memberOpenID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now()
-	for key, until := range s.expected {
-		if !until.After(now) {
-			delete(s.expected, key)
-		}
-	}
-	s.expected[welcomeKey(groupOpenID, memberOpenID)] = now.Add(welcomeWindow)
-}
-
-// claimWelcome reports whether this sender is waiting to be announced, consuming
-// the entry so one welcome is sent per approval.
-func (s *Service) claimWelcome(groupOpenID, memberOpenID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	key := welcomeKey(groupOpenID, memberOpenID)
-	until, ok := s.expected[key]
-	if !ok {
-		return false
-	}
-	delete(s.expected, key)
-	return time.Now().Before(until)
 }
 
 // EmailFromEvent reads the verification answers first, since the group now asks

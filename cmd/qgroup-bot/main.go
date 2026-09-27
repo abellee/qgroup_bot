@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"qgroup-bot/internal/approval"
+	"qgroup-bot/internal/chat"
 	"qgroup-bot/internal/config"
 	"qgroup-bot/internal/qqbot"
 	"qgroup-bot/internal/sub2api"
@@ -36,12 +37,17 @@ func run() error {
 
 	qq := qqbot.NewClient(cfg.QQAPIBase, cfg.AppID, cfg.AppSecret, httpUpstream)
 	dir := sub2api.New(cfg.Sub2APIBase, cfg.Sub2APIAdminKey, cfg.Sub2APIUserRoute, httpUpstream)
-	svc := approval.NewService(qq, dir, cfg.AllowedGroups, cfg.Welcome, log)
+	welcomes := chat.NewWelcomer(qq, cfg.Welcome, log)
+	svc := approval.NewService(qq, dir, cfg.AllowedGroups, welcomes, log)
+
+	// Every group message goes through the router; a model-backed reply is
+	// another handler here, not a change to anything below it.
+	router := chat.NewRouter(log, welcomes.HandleGroupMessage)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	handler, err := qqbot.NewHandler(cfg.AppID, cfg.AppSecret, cfg.MaxSkew, 128, svc.HandleJoin, svc.HandleGroupMessage, log)
+	handler, err := qqbot.NewHandler(cfg.AppID, cfg.AppSecret, cfg.MaxSkew, 128, svc.HandleJoin, router.HandleGroupMessage, log)
 	if err != nil {
 		return err
 	}

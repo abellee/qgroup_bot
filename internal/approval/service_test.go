@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"qgroup-bot/internal/qqbot"
 )
@@ -46,20 +45,13 @@ type reviewCall struct {
 	Body   map[string]string
 }
 
-type sendCall struct {
-	Group   string
-	MsgID   string
-	MsgType int
-	Content string
-}
-
-// qqStub serves the open API endpoints this service uses and records every
-// call, so the outgoing request shapes are checked against what the docs specify.
+// qqStub serves the open API endpoints the approver uses and records every call,
+// so the outgoing request shape is checked against what the docs specify. It
+// answers nothing else, which is how these tests catch the approver reaching for
+// a send - messaging belongs to a group message handler, not to this code.
 type qqStub struct {
-	reviews  []reviewCall
-	sends    []sendCall
-	failSend bool
-	mu       sync.Mutex
+	reviews []reviewCall
+	mu      sync.Mutex
 }
 
 func (s *qqStub) newClient(t *testing.T) *qqbot.Client {
@@ -88,28 +80,6 @@ func (s *qqStub) newClient(t *testing.T) *qqbot.Client {
 			})
 			io.WriteString(w, `{"code":0}`)
 
-		case strings.HasSuffix(r.URL.Path, "/messages"):
-			// v2/groups/<group_openid>/messages
-			if len(parts) != 4 {
-				t.Errorf("unexpected send path %q", r.URL.Path)
-			}
-			var body struct {
-				MsgID    string `json:"msg_id"`
-				MsgType  int    `json:"msg_type"`
-				Markdown struct {
-					Content string `json:"content"`
-				} `json:"markdown"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			s.sends = append(s.sends, sendCall{
-				Group: parts[2], MsgID: body.MsgID, MsgType: body.MsgType, Content: body.Markdown.Content,
-			})
-			if s.failSend {
-				io.WriteString(w, `{"code":301202,"message":"小程序appid不匹配"}`)
-				return
-			}
-			io.WriteString(w, `{"code":0}`)
-
 		default:
 			t.Errorf("unexpected request to %s", r.URL.Path)
 			w.WriteHeader(500)
@@ -125,10 +95,23 @@ func (s *qqStub) reviewed() []reviewCall {
 	return append([]reviewCall(nil), s.reviews...)
 }
 
-func (s *qqStub) announced() []sendCall {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]sendCall(nil), s.sends...)
+// markStub records which approvals the service handed on to whatever follows
+// them, so no test here has to reach for a real follow-up store.
+type markStub struct {
+	mu    sync.Mutex
+	marks []reviewCall
+}
+
+func (m *markStub) Expect(group, member string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.marks = append(m.marks, reviewCall{Group: group, Member: member})
+}
+
+func (m *markStub) marked() []reviewCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]reviewCall(nil), m.marks...)
 }
 
 func discardLogger() *slog.Logger {
@@ -152,40 +135,13 @@ func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestE
 	}
 }
 
-// msgEvent is one pushed group message from `member`, carrying the id a reply
-// would be anchored to.
-func msgEvent(group, member, msgID string) *qqbot.GroupMessageEvent {
-	ev := &qqbot.GroupMessageEvent{
-		ID:          msgID,
-		GroupOpenID: group,
-		Content:     "有人吗",
-	}
-	ev.Author.MemberOpenID = member
-	return ev
-}
-
-func welcomesPending(svc *Service) int {
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	return len(svc.expected)
-}
-
-// expireWelcomes backdates every pending welcome, standing in for the wait
-// before a member who joined and only speaks much later.
-func expireWelcomes(svc *Service) {
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-	for key := range svc.expected {
-		svc.expected[key] = time.Now().Add(-time.Minute)
-	}
-}
-
 // Only a registered email gets an approval; everything else must stay silent,
 // because the bot no longer declines anything.
 func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "", discardLogger())
+	marks := &markStub{}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, marks, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "我的邮箱 Real@User.com"))
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m2", "jr2", "请填写注册邮箱", "stranger@other.com"))
@@ -209,87 +165,9 @@ func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	if got := dir.lookedUp(); len(got) != 2 || got[0] != "real@user.com" || got[1] != "stranger@other.com" {
 		t.Errorf("directory lookups = %v, want the two managed-group emails lower-cased", got)
 	}
-	if len(stub.announced()) != 0 {
-		t.Errorf("welcome sends = %+v, want none while the copy is empty", stub.announced())
-	}
-}
-
-// An approval only registers the newcomer; the note goes out with their own
-// first message, because that is the only event carrying a reply credential the
-// platform accepts.
-func TestWelcomeFollowsTheFirstMessageAfterApproval(t *testing.T) {
-	const welcome = "## 欢迎\n\n请阅读群公告"
-	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, welcome, discardLogger())
-
-	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m9", "msg-other"))
-	if got := len(stub.announced()); got != 0 {
-		t.Fatalf("welcome sends before the newcomer speaks = %d, want none", got)
-	}
-
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-1"))
-	sent := stub.announced()
-	if len(sent) != 1 {
-		t.Fatalf("welcome sends = %+v, want one", sent)
-	}
-	s := sent[0]
-	if s.Group != "g1" {
-		t.Errorf("welcome went to group %q, want g1", s.Group)
-	}
-	if s.MsgID != "msg-1" {
-		t.Errorf("msg_id = %q, want msg-1 (a send with no reply credential is refused)", s.MsgID)
-	}
-	if s.MsgType != 2 {
-		t.Errorf("msg_type = %d, want 2 for a markdown message", s.MsgType)
-	}
-	if s.Content != welcome {
-		t.Errorf("markdown content = %q, want %q", s.Content, welcome)
-	}
-
-	// One welcome per approval, not one per message.
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-2"))
-	if got := len(stub.announced()); got != 1 {
-		t.Errorf("welcome sends = %+v, want the newcomer announced once", stub.announced())
-	}
-}
-
-// The approval itself is what survives a refused send, not the announcement.
-func TestWelcomeFailureKeepsTheApproval(t *testing.T) {
-	stub := &qqStub{failSend: true}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
-
-	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-1"))
-
-	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
-		t.Errorf("review calls = %+v, want the approval to stand", stub.reviewed())
-	}
-	if len(stub.announced()) != 1 {
-		t.Errorf("welcome sends = %+v, want the one failed attempt", stub.announced())
-	}
-}
-
-// Nobody is announced without an approval, and nothing is announced while the
-// copy is empty.
-func TestWelcomeOnlyForApprovedMembers(t *testing.T) {
-	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
-
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m5", "msg-a"))
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "", "msg-b"))
-	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
-	if got := welcomesPending(svc); got != 1 {
-		t.Fatalf("welcomes pending = %d, want the one approval", got)
-	}
-	// The window passing drops the entry instead of announcing later.
-	expireWelcomes(svc)
-	svc.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-c"))
-	if len(stub.announced()) != 0 {
-		t.Errorf("welcome sends = %+v, want none for an unapproved or expired member", stub.announced())
+	// The follow-up signal goes only to the member actually let in.
+	if got := marks.marked(); len(got) != 1 || got[0].Group != "g1" || got[0].Member != "m1" {
+		t.Errorf("marks = %+v, want only g1/m1", got)
 	}
 }
 
@@ -297,7 +175,7 @@ func TestWelcomeOnlyForApprovedMembers(t *testing.T) {
 func TestVerifyMessageFallback(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "", discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, &markStub{}, discardLogger())
 
 	svc.HandleJoin(context.Background(), &qqbot.JoinRequestEvent{
 		GroupOpenID: "g1", MemberOpenID: "m1", JoinRequestID: "jr1",
@@ -312,7 +190,8 @@ func TestVerifyMessageFallback(t *testing.T) {
 func TestInvitedJoinsAreLeftToHumans(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
+	marks := &markStub{}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, marks, discardLogger())
 
 	ev := qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com")
 	ev.ApplySource = qqbot.ApplySourceInvited
@@ -325,22 +204,23 @@ func TestInvitedJoinsAreLeftToHumans(t *testing.T) {
 	if got := dir.lookedUp(); len(got) != 0 {
 		t.Errorf("expected no lookup for an invited join, got %v", got)
 	}
-	if len(stub.announced()) != 0 {
-		t.Errorf("expected no welcome for an invited join, got %+v", stub.announced())
+	if len(marks.marked()) != 0 {
+		t.Errorf("expected no mark for an invited join, got %+v", marks.marked())
 	}
 }
 
 func TestLookupFailureLeavesRequestPending(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{err: errors.New("unreachable")}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "欢迎", discardLogger())
+	marks := &markStub{}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, marks, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
 	if len(stub.reviewed()) != 0 {
 		t.Errorf("expected no review call while sub2api is unreachable, got %+v", stub.reviewed())
 	}
-	if len(stub.announced()) != 0 {
-		t.Errorf("expected no welcome while sub2api is unreachable, got %+v", stub.announced())
+	if len(marks.marked()) != 0 {
+		t.Errorf("expected no mark while sub2api is unreachable, got %+v", marks.marked())
 	}
 }
 
@@ -348,7 +228,7 @@ func TestLookupFailureLeavesRequestPending(t *testing.T) {
 func TestBareQQNumberAnswerGetsTheQQDomain(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"751077517@qq.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, "", discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, &markStub{}, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱自动审批", " 751077517 "))
 	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
@@ -368,8 +248,8 @@ func TestEmailFromAnswer(t *testing.T) {
 		{"751077517", "751077517@qq.com", true},
 		{" 751077517\n", "751077517@qq.com", true},
 		{"7510 77517", "751077517@qq.com", true},
-		{"\u00a0751077517\u00a0", "751077517@qq.com", true},
-		{"\u3000\t751077517 \u3000", "751077517@qq.com", true},
+		{" 751077517 ", "751077517@qq.com", true},
+		{"　\t751077517 　", "751077517@qq.com", true},
 		{"751077517@163.com", "751077517@163.com", true},
 		{"7510 77517 @ qq.com", "751077517@qq.com", true},
 		{"我的邮箱是 abc @ example.com", "abc@example.com", true},
