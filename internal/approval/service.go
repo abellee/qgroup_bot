@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"qgroup-bot/internal/qqbot"
 )
@@ -132,14 +133,32 @@ func EmailFromEvent(ev *qqbot.JoinRequestEvent) (string, bool) {
 // email-looking token wins, and a bare QQ number stands for its @qq.com
 // address. A number mixed into prose is not a QQ number answer, so only text
 // that is nothing but digits gets the suffix.
+//
+// Whitespace is collapsed only after the text is read as typed, otherwise
+// "my email is a@b.co" would glue its words into one long local part.
 func EmailFromAnswer(text string) (string, bool) {
 	if email, ok := ExtractEmail(text); ok {
 		return email, true
 	}
-	if digits := strings.TrimSpace(text); qqNumberPattern.MatchString(digits) {
-		return digits + "@qq.com", true
+	collapsed := dropSpace(text)
+	if email, ok := ExtractEmail(collapsed); ok {
+		return email, true
+	}
+	if qqNumberPattern.MatchString(collapsed) {
+		return collapsed + "@qq.com", true
 	}
 	return "", false
+}
+
+// dropSpace removes every space character, including the full-width and
+// no-break ones an IME or a paste leaves inside an address.
+func dropSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // ExtractEmail finds the first email-looking token in free text and normalises
