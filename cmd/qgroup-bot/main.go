@@ -36,7 +36,7 @@ func run() error {
 
 	qq := qqbot.NewClient(cfg.QQAPIBase, cfg.AppID, cfg.AppSecret, httpUpstream)
 	dir := sub2api.New(cfg.Sub2APIBase, cfg.Sub2APIAdminKey, cfg.Sub2APIUserRoute, httpUpstream)
-	svc := approval.NewService(qq, dir, cfg.AllowedGroups, log)
+	svc := approval.NewService(qq, dir, cfg.AllowedGroups, cfg.Welcome, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

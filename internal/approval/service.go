@@ -24,18 +24,22 @@ type Directory interface {
 // Service decides the fate of one join request: the answer given to the group's
 // verification question must be the email of a registered sub2api account.
 //
-// Approving is the only action taken. Every other outcome - no email in the
+// Approving is the only judgement made. Every other outcome - no email in the
 // answers, an unregistered email, a lookup that fails - leaves the request
-// pending for a human, and nothing is ever auto-rejected.
+// pending for a human, and nothing is ever auto-rejected. A successful approval
+// then posts the configured welcome note to the group.
 type Service struct {
-	qq     *qqbot.Client
-	dir    Directory
-	groups map[string]struct{}
-	log    *slog.Logger
+	qq      *qqbot.Client
+	dir     Directory
+	groups  map[string]struct{}
+	welcome string
+	log     *slog.Logger
 }
 
-func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, log *slog.Logger) *Service {
-	return &Service{qq: qq, dir: dir, groups: groups, log: log}
+// NewService wires the approver. An empty welcome markdown leaves the group
+// announcement disabled, which is the safe default when the copy is not set.
+func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, welcome string, log *slog.Logger) *Service {
+	return &Service{qq: qq, dir: dir, groups: groups, welcome: welcome, log: log}
 }
 
 func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
@@ -98,6 +102,16 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 		return
 	}
 	s.log.Info("join review", append(logFields, "action", "approve", "took", time.Since(start).String())...)
+
+	// The applicant is already in the group, so a failed announcement is only
+	// worth logging; nothing about the approval changes.
+	if s.welcome != "" {
+		if err := s.qq.SendGroupMarkdown(ctx, ev.GroupOpenID, s.welcome); err != nil {
+			s.log.Error("welcome message send failed", append(logFields, "error", err)...)
+			return
+		}
+		s.log.Info("welcome message sent", logFields...)
+	}
 }
 
 // EmailFromEvent reads the verification answers first, since the group now asks

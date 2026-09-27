@@ -132,6 +132,40 @@ func (c *Client) ApproveJoin(ctx context.Context, ev *JoinRequestEvent) error {
 	return nil
 }
 
+// SendGroupMarkdown posts a markdown message to a group. Welcome notes are
+// proactive sends, so they carry no msg_id, and the platform caps them at 20
+// per minute and 1000 per day per group.
+func (c *Client) SendGroupMarkdown(ctx context.Context, groupOpenID, markdown string) error {
+	if groupOpenID == "" {
+		return fmt.Errorf("event is missing group_openid")
+	}
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"msg_type": 2,
+		"markdown": map[string]string{"content": markdown},
+	})
+	if err != nil {
+		return err
+	}
+
+	u := fmt.Sprintf("%s/v2/groups/%s/messages", c.base, url.PathEscape(groupOpenID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "QQBot "+token)
+
+	if err := c.do(req, nil); err != nil {
+		return fmt.Errorf("send group markdown: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) do(req *http.Request, out any) error {
 	resp, err := c.hc.Do(req)
 	if err != nil {

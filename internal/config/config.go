@@ -25,6 +25,9 @@ type Config struct {
 
 	AllowedGroups map[string]struct{}
 
+	// Welcome is the markdown announced in the group after an approval; empty
+	// means no announcement is made.
+	Welcome  string
 	Upstream time.Duration
 }
 
@@ -42,6 +45,9 @@ func Load() (*Config, error) {
 		Sub2APIAdminKey: os.Getenv("QGB_SUB2API_ADMIN_KEY"),
 		Sub2APIUserRoute: env("QGB_SUB2API_USER_ROUTE", "/api/v1/admin/users"),
 		Upstream:         envDuration("QGB_UPSTREAM_TIMEOUT", 8*time.Second),
+		// An env file cannot carry real line breaks, so the markdown copy is
+		// written with \n escapes and expanded here.
+		Welcome: strings.ReplaceAll(env("QGB_WELCOME_MARKDOWN", ""), `\n`, "\n"),
 	}
 
 	if c.AppID == "" {
