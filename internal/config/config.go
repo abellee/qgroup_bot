@@ -25,8 +25,7 @@ type Config struct {
 
 	AllowedGroups map[string]struct{}
 
-	RejectReason string
-	Upstream     time.Duration
+	Upstream time.Duration
 }
 
 func Load() (*Config, error) {
@@ -42,8 +41,7 @@ func Load() (*Config, error) {
 		Sub2APIBase:     os.Getenv("QGB_SUB2API_BASE"),
 		Sub2APIAdminKey: os.Getenv("QGB_SUB2API_ADMIN_KEY"),
 		Sub2APIUserRoute: env("QGB_SUB2API_USER_ROUTE", "/api/v1/admin/users"),
-		RejectReason:    env("QGB_REJECT_REASON", "入群申请未通过，请确认填写信息或联系管理员"),
-		Upstream:        envDuration("QGB_UPSTREAM_TIMEOUT", 8*time.Second),
+		Upstream:         envDuration("QGB_UPSTREAM_TIMEOUT", 8*time.Second),
 	}
 
 	if c.AppID == "" {

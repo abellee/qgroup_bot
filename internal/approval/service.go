@@ -17,21 +17,21 @@ type Directory interface {
 	UserExists(ctx context.Context, email string) (bool, error)
 }
 
-// Service decides the fate of one join request: the applicant's verification
-// message must contain the email of a registered sub2api account.
+// Service decides the fate of one join request: the answer given to the group's
+// verification question must be the email of a registered sub2api account.
 //
-// Every decision is logged; anything that cannot be judged (sub2api unreachable
-// or answering in an unexpected way) is left pending so a human still sees it.
+// Approving is the only action taken. Every other outcome - no email in the
+// answers, an unregistered email, a lookup that fails - leaves the request
+// pending for a human, and nothing is ever auto-rejected.
 type Service struct {
-	qq           *qqbot.Client
-	dir          Directory
-	groups       map[string]struct{}
-	rejectReason string
-	log          *slog.Logger
+	qq     *qqbot.Client
+	dir    Directory
+	groups map[string]struct{}
+	log    *slog.Logger
 }
 
-func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, rejectReason string, log *slog.Logger) *Service {
-	return &Service{qq: qq, dir: dir, groups: groups, rejectReason: rejectReason, log: log}
+func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, log *slog.Logger) *Service {
+	return &Service{qq: qq, dir: dir, groups: groups, log: log}
 }
 
 func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
@@ -70,13 +70,9 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	}
 	start := time.Now()
 
-	if ev.Bot {
-		s.decide(ctx, ev, "decline", append(logFields, "reason", "robot account")...)
-		return
-	}
-	email, ok := ExtractEmail(ev.VerifyInfo.VerifyMessage)
+	email, ok := EmailFromEvent(ev)
 	if !ok {
-		s.decide(ctx, ev, "decline", append(logFields, "reason", "no email in verify message")...)
+		s.log.Info("join review ignored: no email in the answers", append(logFields, "reason", "no email")...)
 		return
 	}
 	logFields = append(logFields, "email", MaskEmail(email))
@@ -87,25 +83,29 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 			append(logFields, "error", err)...)
 		return
 	}
-	if found {
-		s.decide(ctx, ev, "approve", append(logFields, "took", time.Since(start).String())...)
+	if !found {
+		s.log.Info("join review ignored: email not registered",
+			append(logFields, "reason", "email not registered")...)
 		return
 	}
-	s.decide(ctx, ev, "decline", append(logFields, "reason", "email not registered")...)
+
+	if err := s.qq.ApproveJoin(ctx, ev); err != nil {
+		s.log.Error("join approval failed", append(logFields, "action", "approve", "error", err)...)
+		return
+	}
+	s.log.Info("join review", append(logFields, "action", "approve", "took", time.Since(start).String())...)
 }
 
-func (s *Service) decide(ctx context.Context, ev *qqbot.JoinRequestEvent, action string, fields ...any) {
-	var err error
-	if action == "approve" {
-		err = s.qq.ApproveJoin(ctx, ev)
-	} else {
-		err = s.qq.DeclineJoin(ctx, ev, s.rejectReason)
+// EmailFromEvent reads the verification answers first, since the group now asks
+// for the email through a question; the free-text verify message stays as a
+// fallback for groups still using that verification mode.
+func EmailFromEvent(ev *qqbot.JoinRequestEvent) (string, bool) {
+	for _, qa := range ev.VerifyInfo.ReviewQAList {
+		if email, ok := ExtractEmail(qa.Answer); ok {
+			return email, true
+		}
 	}
-	if err != nil {
-		s.log.Error("join review failed", append(fields, "action", action, "error", err)...)
-		return
-	}
-	s.log.Info("join review", append(fields, "action", action)...)
+	return ExtractEmail(ev.VerifyInfo.VerifyMessage)
 }
 
 // ExtractEmail finds the first email-looking token in free text and normalises

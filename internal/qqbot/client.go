@@ -100,20 +100,7 @@ func parseSeconds(raw json.RawMessage) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
-const (
-	reviewApprove = "approve"
-	reviewDecline = "decline"
-)
-
 func (c *Client) ApproveJoin(ctx context.Context, ev *JoinRequestEvent) error {
-	return c.review(ctx, ev, reviewApprove, "")
-}
-
-func (c *Client) DeclineJoin(ctx context.Context, ev *JoinRequestEvent, reason string) error {
-	return c.review(ctx, ev, reviewDecline, reason)
-}
-
-func (c *Client) review(ctx context.Context, ev *JoinRequestEvent, op, reason string) error {
 	if ev.GroupOpenID == "" || ev.MemberOpenID == "" {
 		return fmt.Errorf("event is missing group_openid or member_openid")
 	}
@@ -122,21 +109,17 @@ func (c *Client) review(ctx context.Context, ev *JoinRequestEvent, op, reason st
 		return err
 	}
 
-	payload := map[string]string{
-		"op":              op,
+	payload, err := json.Marshal(map[string]string{
+		"op":              "approve",
 		"join_request_id": ev.JoinRequestID,
-	}
-	if op == reviewDecline && reason != "" {
-		payload["reject_reason"] = reason
-	}
-	body, err := json.Marshal(payload)
+	})
 	if err != nil {
 		return err
 	}
 
 	u := fmt.Sprintf("%s/v2/groups/%s/approval_join_request/%s",
 		c.base, url.PathEscape(ev.GroupOpenID), url.PathEscape(ev.MemberOpenID))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -144,7 +127,7 @@ func (c *Client) review(ctx context.Context, ev *JoinRequestEvent, op, reason st
 	req.Header.Set("Authorization", "QQBot "+token)
 
 	if err := c.do(req, nil); err != nil {
-		return fmt.Errorf("%s join request %s: %w", op, ev.JoinRequestID, err)
+		return fmt.Errorf("approve join request %s: %w", ev.JoinRequestID, err)
 	}
 	return nil
 }
