@@ -4,12 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
 type recorded struct {
 	head  http.Header
-	query map[string][]string
+	query url.Values
 }
 
 // newStub serves a canned admin response and records how it was asked.
