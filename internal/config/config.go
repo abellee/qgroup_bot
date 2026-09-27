@@ -25,10 +25,10 @@ type Config struct {
 
 	AllowedGroups map[string]struct{}
 
-	// Welcome is the markdown announced in the group once a newly approved
-	// member speaks; empty means no announcement is made.
-	Welcome  string
-	Upstream time.Duration
+	// ChatReply is the markdown the bot answers an addressed message with;
+	// empty means the bot stays quiet in the group.
+	ChatReply string
+	Upstream  time.Duration
 }
 
 func Load() (*Config, error) {
@@ -47,7 +47,7 @@ func Load() (*Config, error) {
 		Upstream:         envDuration("QGB_UPSTREAM_TIMEOUT", 8*time.Second),
 		// An env file cannot carry real line breaks, so the markdown copy is
 		// written with \n escapes and expanded here.
-		Welcome: strings.ReplaceAll(env("QGB_WELCOME_MARKDOWN", ""), `\n`, "\n"),
+		ChatReply:        strings.ReplaceAll(env("QGB_CHAT_REPLY_MARKDOWN", ""), `\n`, "\n"),
 	}
 
 	if c.AppID == "" {

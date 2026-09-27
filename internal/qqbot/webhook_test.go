@@ -194,6 +194,9 @@ func TestHandlerRoutesGroupMessage(t *testing.T) {
 	if ev.ID != "ROBOT1.0_abc" || ev.GroupOpenID != "g1" || ev.Author.MemberOpenID != "m1" {
 		t.Errorf("decoded message event = %+v, want the reply id, group and sender", ev)
 	}
+	if ev.Kind != EventGroupAtMessageCreate {
+		t.Errorf("kind = %q, want %q, the handler needs to know the bot was addressed", ev.Kind, EventGroupAtMessageCreate)
+	}
 	if !strings.Contains(string(ev.Raw), "有人吗") {
 		t.Errorf("raw body = %q, want the untouched event", string(ev.Raw))
 	}

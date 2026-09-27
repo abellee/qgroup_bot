@@ -44,8 +44,8 @@ func replyStub(t *testing.T, response string) (client *Client, requests func() [
 	}
 }
 
-// The passive reply the welcome note depends on: markdown under msg_type 2,
-// anchored to the message id the platform handed out.
+// The reply a group message is anchored to: markdown under msg_type 2, keyed by
+// the message id the platform handed out.
 func TestReplyGroupMarkdownShape(t *testing.T) {
 	client, requests := replyStub(t, `{"code":0}`)
 

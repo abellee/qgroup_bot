@@ -95,25 +95,6 @@ func (s *qqStub) reviewed() []reviewCall {
 	return append([]reviewCall(nil), s.reviews...)
 }
 
-// markStub records which approvals the service handed on to whatever follows
-// them, so no test here has to reach for a real follow-up store.
-type markStub struct {
-	mu    sync.Mutex
-	marks []reviewCall
-}
-
-func (m *markStub) Expect(group, member string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.marks = append(m.marks, reviewCall{Group: group, Member: member})
-}
-
-func (m *markStub) marked() []reviewCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]reviewCall(nil), m.marks...)
-}
-
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -140,8 +121,7 @@ func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestE
 func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	marks := &markStub{}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, marks, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "我的邮箱 Real@User.com"))
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m2", "jr2", "请填写注册邮箱", "stranger@other.com"))
@@ -165,17 +145,13 @@ func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	if got := dir.lookedUp(); len(got) != 2 || got[0] != "real@user.com" || got[1] != "stranger@other.com" {
 		t.Errorf("directory lookups = %v, want the two managed-group emails lower-cased", got)
 	}
-	// The follow-up signal goes only to the member actually let in.
-	if got := marks.marked(); len(got) != 1 || got[0].Group != "g1" || got[0].Member != "m1" {
-		t.Errorf("marks = %+v, want only g1/m1", got)
-	}
 }
 
 // Groups still on message verification keep working.
 func TestVerifyMessageFallback(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, &markStub{}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
 
 	svc.HandleJoin(context.Background(), &qqbot.JoinRequestEvent{
 		GroupOpenID: "g1", MemberOpenID: "m1", JoinRequestID: "jr1",
@@ -190,8 +166,7 @@ func TestVerifyMessageFallback(t *testing.T) {
 func TestInvitedJoinsAreLeftToHumans(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	marks := &markStub{}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, marks, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
 
 	ev := qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com")
 	ev.ApplySource = qqbot.ApplySourceInvited
@@ -204,23 +179,16 @@ func TestInvitedJoinsAreLeftToHumans(t *testing.T) {
 	if got := dir.lookedUp(); len(got) != 0 {
 		t.Errorf("expected no lookup for an invited join, got %v", got)
 	}
-	if len(marks.marked()) != 0 {
-		t.Errorf("expected no mark for an invited join, got %+v", marks.marked())
-	}
 }
 
 func TestLookupFailureLeavesRequestPending(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{err: errors.New("unreachable")}
-	marks := &markStub{}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, marks, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
 	if len(stub.reviewed()) != 0 {
 		t.Errorf("expected no review call while sub2api is unreachable, got %+v", stub.reviewed())
-	}
-	if len(marks.marked()) != 0 {
-		t.Errorf("expected no mark while sub2api is unreachable, got %+v", marks.marked())
 	}
 }
 
@@ -228,7 +196,7 @@ func TestLookupFailureLeavesRequestPending(t *testing.T) {
 func TestBareQQNumberAnswerGetsTheQQDomain(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"751077517@qq.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, &markStub{}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱自动审批", " 751077517 "))
 	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {

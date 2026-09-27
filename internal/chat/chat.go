@@ -1,7 +1,7 @@
 // Package chat holds everything the bot does when a member posts in a group.
-// One message is handed to every registered handler, so the welcome note and a
-// later model-backed reply can act on the same arrival without either knowing
-// about the other.
+// One message is handed to every registered handler, so the canned markdown
+// answer of today and the model-backed reply of tomorrow can act on the same
+// arrival without knowing about each other.
 package chat
 
 import (

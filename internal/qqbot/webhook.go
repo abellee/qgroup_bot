@@ -52,8 +52,8 @@ func NewHandler(appID, botSecret string, maxSkew time.Duration, queueSize int, o
 }
 
 // Start runs the single worker draining both queues. One worker keeps events in
-// the order the platform sent them, which matters because a newcomer who posts
-// straight away must not be handled before the approval registered their welcome.
+// the order the platform sent them, so a message is never answered before the
+// join request just before it has been reviewed.
 func (h *Handler) Start(ctx context.Context) {
 	go func() {
 		for {
@@ -157,6 +157,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, env Envelope) {
 			return
 		}
 		ev.Raw = env.D
+		ev.Kind = env.T
 		select {
 		case h.msgQueue <- &ev:
 		default:

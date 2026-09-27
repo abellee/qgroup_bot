@@ -71,8 +71,8 @@ type JoinRequestEvent struct {
 	Raw json.RawMessage `json:"-"`
 
 	// EventID is the dispatch envelope's `id`, filled in by the webhook layer.
-	// It is log correlation only: a join event cannot be replied to, which is
-	// why the welcome note waits for one of the member's messages instead.
+	// It is log correlation only: a join event cannot be replied to, so nothing
+	// here can be answered from it.
 	EventID string `json:"-"`
 }
 
@@ -91,6 +91,12 @@ type GroupMessageEvent struct {
 		Username     string `json:"username"`
 		MemberOpenID string `json:"member_openid"`
 	} `json:"author"`
+
+	// Kind is the envelope `t` this arrived as, filled in by the webhook layer.
+	// The payload itself does not say whether the sender addressed the bot, and
+	// a handler that only answers being spoken to has to tell the two events
+	// apart.
+	Kind string `json:"-"`
 
 	// Raw keeps the untouched body, so fields the docs do not list stay
 	// discoverable in the logs while the event shape is confirmed live.

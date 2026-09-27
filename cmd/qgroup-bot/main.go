@@ -37,12 +37,12 @@ func run() error {
 
 	qq := qqbot.NewClient(cfg.QQAPIBase, cfg.AppID, cfg.AppSecret, httpUpstream)
 	dir := sub2api.New(cfg.Sub2APIBase, cfg.Sub2APIAdminKey, cfg.Sub2APIUserRoute, httpUpstream)
-	welcomes := chat.NewWelcomer(qq, cfg.Welcome, log)
-	svc := approval.NewService(qq, dir, cfg.AllowedGroups, welcomes, log)
+	reply := chat.NewMarkdownReply(qq, cfg.ChatReply, log)
+	svc := approval.NewService(qq, dir, cfg.AllowedGroups, log)
 
-	// Every group message goes through the router; a model-backed reply is
-	// another handler here, not a change to anything below it.
-	router := chat.NewRouter(log, welcomes.HandleGroupMessage)
+	// Every group message goes through the router; the model-backed reply of
+	// later is another handler here, not a change to anything below it.
+	router := chat.NewRouter(log, reply.HandleGroupMessage)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -23,13 +23,6 @@ type Directory interface {
 	UserExists(ctx context.Context, email string) (bool, error)
 }
 
-// Expecting hears about a member that was just approved. What happens next is
-// not the approver's business: today the only implementation announces them on
-// their first message, and a dialogue handler can register for the same signal.
-type Expecting interface {
-	Expect(groupOpenID, memberOpenID string)
-}
-
 // Service decides the fate of one join request: the answer given to the group's
 // verification question must be the email of a registered sub2api account.
 //
@@ -37,17 +30,14 @@ type Expecting interface {
 // answers, an unregistered email, a lookup that fails - leaves the request
 // pending for a human, and nothing is ever auto-rejected.
 type Service struct {
-	qq       *qqbot.Client
-	dir      Directory
-	groups   map[string]struct{}
-	welcomes Expecting
-	log      *slog.Logger
+	qq     *qqbot.Client
+	dir    Directory
+	groups map[string]struct{}
+	log    *slog.Logger
 }
 
-// NewService wires the approver. welcomes must not be nil; a handler with
-// nothing to say is cheaper than a nil check on every approval.
-func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, welcomes Expecting, log *slog.Logger) *Service {
-	return &Service{qq: qq, dir: dir, groups: groups, welcomes: welcomes, log: log}
+func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, log *slog.Logger) *Service {
+	return &Service{qq: qq, dir: dir, groups: groups, log: log}
 }
 
 func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
@@ -111,10 +101,6 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 		return
 	}
 	s.log.Info("join review", append(logFields, "action", "approve", "took", time.Since(start).String())...)
-
-	if ev.MemberOpenID != "" {
-		s.welcomes.Expect(ev.GroupOpenID, ev.MemberOpenID)
-	}
 }
 
 // EmailFromEvent reads the verification answers first, since the group now asks

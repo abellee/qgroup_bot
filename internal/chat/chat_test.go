@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
-	"time"
 
 	"qgroup-bot/internal/qqbot"
 )
@@ -38,10 +37,11 @@ func (r *replyStub) sent() []replyCall {
 	return append([]replyCall(nil), r.calls...)
 }
 
-func msgEvent(group, member, msgID string) *qqbot.GroupMessageEvent {
+func msgEvent(kind, group, member, msgID string) *qqbot.GroupMessageEvent {
 	ev := &qqbot.GroupMessageEvent{
 		ID:          msgID,
 		GroupOpenID: group,
+		Kind:        kind,
 		Content:     "有人吗",
 	}
 	ev.Author.MemberOpenID = member
@@ -52,90 +52,72 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// A mark only turns into a message once: the newcomer is announced on their
-// first post, and never again for that approval.
-func TestWelcomeAnnouncesAMarkedMemberOnce(t *testing.T) {
-	const welcome = "## 欢迎\n\n请阅读群公告"
+// The bot answers only messages that address it. The full-traffic event carries
+// everything the group says, and replying to all of it would spam the group.
+func TestRepliesOnlyToAddressedMessages(t *testing.T) {
 	replies := &replyStub{}
-	w := NewWelcomer(replies, welcome, discardLogger())
+	reply := NewMarkdownReply(replies, "## 收到\n\n有事请说明", discardLogger())
 	ctx := context.Background()
 
-	w.Expect("g1", "m1")
-	w.HandleGroupMessage(ctx, msgEvent("g1", "m9", "msg-1"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupMessageCreate, "g1", "m1", "msg-1"))
 	if got := len(replies.sent()); got != 0 {
-		t.Fatalf("replies for an unmarked member = %d, want none", got)
+		t.Fatalf("replies to a plain group message = %+v, want none", got)
 	}
 
-	w.HandleGroupMessage(ctx, msgEvent("g1", "m1", "msg-2"))
-	w.HandleGroupMessage(ctx, msgEvent("g1", "m1", "msg-3"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2"))
 
 	sent := replies.sent()
 	if len(sent) != 1 {
-		t.Fatalf("replies = %+v, want exactly one welcome", sent)
+		t.Fatalf("replies = %+v, want one answer per addressed message", sent)
 	}
 	s := sent[0]
-	if s.Group != "g1" || s.MsgID != "msg-2" || s.Markdown != welcome {
-		t.Errorf("reply = %+v, want the marked member's message answered with the copy", s)
+	if s.Group != "g1" || s.MsgID != "msg-2" || s.Markdown != "## 收到\n\n有事请说明" {
+		t.Errorf("reply = %+v, want the addressed message answered with the configured copy", s)
 	}
 }
 
-// The mark belongs to one group, so the same person in another group is not
-// announced by it.
-func TestWelcomeIsScopedToTheGroup(t *testing.T) {
+// Every addressed message is answered, so a second @ gets a second reply.
+func TestEachAddressedMessageIsAnswered(t *testing.T) {
 	replies := &replyStub{}
-	w := NewWelcomer(replies, "欢迎", discardLogger())
-
-	w.Expect("g1", "m1")
-	w.HandleGroupMessage(context.Background(), msgEvent("g2", "m1", "msg-1"))
-	if got := len(replies.sent()); got != 0 {
-		t.Errorf("replies = %+v, want none across groups", got)
-	}
-}
-
-// An expired mark is dropped instead of announcing someone long after they
-// joined, and no copy means no marking at all.
-func TestWelcomeWindowAndEmptyCopy(t *testing.T) {
+	reply := NewMarkdownReply(replies, "在", discardLogger())
 	ctx := context.Background()
 
-	replies := &replyStub{}
-	w := NewWelcomer(replies, "欢迎", discardLogger())
-	w.Expect("g1", "m1")
-	w.mu.Lock()
-	for key := range w.marked {
-		w.marked[key] = time.Now().Add(-time.Minute)
-	}
-	w.mu.Unlock()
-	w.HandleGroupMessage(ctx, msgEvent("g1", "m1", "msg-1"))
-	if got := len(replies.sent()); got != 0 {
-		t.Errorf("replies after the window = %+v, want none", got)
-	}
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2"))
 
-	quiet := &replyStub{}
-	silent := NewWelcomer(quiet, "", discardLogger())
-	silent.Expect("g1", "m1")
-	silent.HandleGroupMessage(ctx, msgEvent("g1", "m1", "msg-2"))
-	if got := len(quiet.sent()); got != 0 {
+	if got := len(replies.sent()); got != 2 {
+		t.Errorf("replies = %+v, want one for each message", got)
+	}
+}
+
+func TestNoCopyConfiguredMeansSilent(t *testing.T) {
+	replies := &replyStub{}
+	reply := NewMarkdownReply(replies, "", discardLogger())
+
+	reply.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
+
+	if got := len(replies.sent()); got != 0 {
 		t.Errorf("replies with no copy configured = %+v, want none", got)
 	}
 }
 
-// A refused send is not retried on the next message; the mark is already spent.
-func TestWelcomeSendFailureIsNotRetried(t *testing.T) {
+// A refused send is logged, not retried: the message event is already spent and
+// one failure per arrival is enough noise for a group.
+func TestSendFailureIsNotRetried(t *testing.T) {
 	replies := &replyStub{err: errors.New("http 400: 40034024")}
-	w := NewWelcomer(replies, "欢迎", discardLogger())
+	reply := NewMarkdownReply(replies, "在", discardLogger())
 	ctx := context.Background()
 
-	w.Expect("g1", "m1")
-	w.HandleGroupMessage(ctx, msgEvent("g1", "m1", "msg-1"))
-	w.HandleGroupMessage(ctx, msgEvent("g1", "m1", "msg-2"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2"))
 
-	if got := len(replies.sent()); got != 1 {
-		t.Errorf("replies = %+v, want the single failed attempt", replies.sent())
+	if got := len(replies.sent()); got != 2 {
+		t.Errorf("replies = %+v, want each arrival attempted once", got)
 	}
 }
 
-// Every handler sees the same message, which is where a model-backed reply will
-// join the welcome note.
+// Every handler sees the same message, which is where a model-backed reply
+// joins the router.
 func TestRouterFansOutToEveryHandler(t *testing.T) {
 	var order []string
 	var mu sync.Mutex
@@ -148,7 +130,7 @@ func TestRouterFansOutToEveryHandler(t *testing.T) {
 	}
 	router := NewRouter(discardLogger(), record("first"), record("second"))
 
-	router.HandleGroupMessage(context.Background(), msgEvent("g1", "m1", "msg-1"))
+	router.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
 
 	mu.Lock()
 	defer mu.Unlock()
