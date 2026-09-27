@@ -13,6 +13,10 @@ import (
 
 var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
+// Applicants answer the group question with their QQ number, whose registered
+// address is the same digits at @qq.com.
+var qqNumberPattern = regexp.MustCompile(`^[0-9]+$`)
+
 type Directory interface {
 	UserExists(ctx context.Context, email string) (bool, error)
 }
@@ -101,11 +105,25 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 // fallback for groups still using that verification mode.
 func EmailFromEvent(ev *qqbot.JoinRequestEvent) (string, bool) {
 	for _, qa := range ev.VerifyInfo.ReviewQAList {
-		if email, ok := ExtractEmail(qa.Answer); ok {
+		if email, ok := EmailFromAnswer(qa.Answer); ok {
 			return email, true
 		}
 	}
-	return ExtractEmail(ev.VerifyInfo.VerifyMessage)
+	return EmailFromAnswer(ev.VerifyInfo.VerifyMessage)
+}
+
+// EmailFromAnswer turns one piece of applicant text into an address: the first
+// email-looking token wins, and a bare QQ number stands for its @qq.com
+// address. A number mixed into prose is not a QQ number answer, so only text
+// that is nothing but digits gets the suffix.
+func EmailFromAnswer(text string) (string, bool) {
+	if email, ok := ExtractEmail(text); ok {
+		return email, true
+	}
+	if digits := strings.TrimSpace(text); qqNumberPattern.MatchString(digits) {
+		return digits + "@qq.com", true
+	}
+	return "", false
 }
 
 // ExtractEmail finds the first email-looking token in free text and normalises

@@ -200,6 +200,47 @@ func TestEmailFromEvent(t *testing.T) {
 	}
 }
 
+// A bare QQ number answer stands for the applicant's @qq.com address.
+func TestBareQQNumberAnswerGetsTheQQDomain(t *testing.T) {
+	base, calls := newQQStub(t)
+	qq := qqbot.NewClient(base, "11111111", "secret", &http.Client{})
+	dir := &stubDirectory{members: map[string]bool{"751077517@qq.com": true}}
+	svc := NewService(qq, dir, map[string]struct{}{"g1": {}}, discardLogger())
+
+	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱自动审批", " 751077517 "))
+	if len(*calls) != 1 || (*calls)[0].Op != "approve" {
+		t.Errorf("review calls = %+v, want one approval for the implied @qq.com address", *calls)
+	}
+	if got := dir.lookedUp(); len(got) != 1 || got[0] != "751077517@qq.com" {
+		t.Errorf("directory lookups = %v, want [751077517@qq.com]", got)
+	}
+}
+
+func TestEmailFromAnswer(t *testing.T) {
+	cases := []struct {
+		in    string
+		want  string
+		found bool
+	}{
+		{"751077517", "751077517@qq.com", true},
+		{" 751077517\n", "751077517@qq.com", true},
+		{"751077517@163.com", "751077517@163.com", true},
+		{"我的QQ是751077517", "", false},
+		{"hello", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		got, ok := EmailFromAnswer(c.in)
+		if ok != c.found {
+			t.Errorf("EmailFromAnswer(%q) found = %v, want %v", c.in, ok, c.found)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("EmailFromAnswer(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestExtractEmail(t *testing.T) {
 	cases := []struct {
 		in    string
