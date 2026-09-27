@@ -1,6 +1,6 @@
 services:
   qgroup-bot:
-    image: ghcr.io/abellee/qgroup-bot:0.1.2
+    image: ghcr.io/abellee/qgroup-bot:0.2.0
     container_name: qgroup-bot
     # Host networking like the other services here: OpenResty is also on the
     # host namespace, so it can proxy straight to 127.0.0.1:8092.
