@@ -35,6 +35,21 @@ func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, rej
 }
 
 func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
+	// Logged before any filtering so a request from an unmanaged group is still
+	// readable in full: that is how the applicant's text and the group openID
+	// are recovered during bootstrap.
+	s.log.Info("join request received",
+		"group_openid", ev.GroupOpenID,
+		"member_openid", ev.MemberOpenID,
+		"union_openid", ev.UnionOpenID,
+		"username", ev.Username,
+		"apply_source", ev.ApplySource,
+		"verify_method", ev.VerifyInfo.Method,
+		"verify_message", ev.VerifyInfo.VerifyMessage,
+		"review_qa", ev.VerifyInfo.ReviewQAList,
+		"raw", string(ev.Raw),
+	)
+
 	if _, ok := s.groups[ev.GroupOpenID]; !ok {
 		s.log.Info("join review skipped: group not managed",
 			"group_openid", ev.GroupOpenID, "member_openid", ev.MemberOpenID)

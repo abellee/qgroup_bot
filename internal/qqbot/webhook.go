@@ -132,6 +132,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, env Envelope) {
 		h.log.Warn("bad join request event", "id", env.ID, "error", err)
 		return
 	}
+	ev.Raw = env.D
 	select {
 	case h.queue <- &ev:
 	default:

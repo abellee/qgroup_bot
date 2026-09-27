@@ -55,6 +55,11 @@ type JoinRequestEvent struct {
 	AutoApproved  *struct {
 		StrategyID string `json:"strategy_id"`
 	} `json:"auto_approved"`
+
+	// Raw is the untouched event body, filled in by the webhook layer. The
+	// documented field list has no plain QQ number, so keeping the original
+	// JSON is how an undocumented identity field stays discoverable in logs.
+	Raw json.RawMessage `json:"-"`
 }
 
 const (
