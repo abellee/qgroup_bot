@@ -14,6 +14,7 @@ import (
 	"qgroup-bot/internal/approval"
 	"qgroup-bot/internal/chat"
 	"qgroup-bot/internal/config"
+	"qgroup-bot/internal/guard"
 	"qgroup-bot/internal/llm"
 	"qgroup-bot/internal/qqbot"
 	"qgroup-bot/internal/store"
@@ -105,10 +106,16 @@ func run() error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	// Nothing on this host is meant to be crawled; the file says so for the
+	// crawlers that still read it.
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           guard.New(log).Wrap(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      10 * time.Second,

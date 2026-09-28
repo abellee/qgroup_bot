@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"qgroup-bot/internal/guard"
 	"qgroup-bot/internal/store"
 )
 
@@ -85,7 +86,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	addr := clientAddr(r)
+	addr := guard.ClientAddr(r)
 	if wait := s.lockedFor(addr); wait > 0 {
 		writeError(w, http.StatusTooManyRequests, "失败次数过多，请 "+fmtWait(wait)+" 后重试")
 		return
@@ -428,7 +429,7 @@ func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	// Every session dies with the old credentials, the caller's included: the
 	// operator signs back in with what they just set.
 	s.dropAllSessions()
-	s.log.Info("admin account updated", "renamed", nameChanged, "password_changed", passChanged, "addr", clientAddr(r))
+	s.log.Info("admin account updated", "renamed", nameChanged, "password_changed", passChanged, "addr", guard.ClientAddr(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

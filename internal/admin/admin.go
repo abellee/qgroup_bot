@@ -13,7 +13,6 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -310,18 +309,4 @@ func requestIsHTTPS(r *http.Request) bool {
 		return true
 	}
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))), "https")
-}
-
-// clientAddr prefers the forwarded address because the panel only ever sees the
-// front proxy as RemoteAddr.
-func clientAddr(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if first, _, _ := strings.Cut(fwd, ","); strings.TrimSpace(first) != "" {
-			return strings.TrimSpace(first)
-		}
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }
