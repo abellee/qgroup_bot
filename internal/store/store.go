@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS model_configs (
 );
 
 CREATE INDEX IF NOT EXISTS model_configs_enabled ON model_configs (enabled);
+
+CREATE TABLE IF NOT EXISTS settings (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 `
 
 func (s *Store) migrate() error {
@@ -80,6 +85,24 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("migrate sqlite schema: %w", err)
 	}
 	return nil
+}
+
+// Setting reads one row of the small key/value table. A missing key reads as an
+// empty value, so callers can treat "unset" as the normal first-run case.
+func (s *Store) Setting(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
+// SetSetting writes one row over whatever was there.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
 }
 
 // Admin is one administrator. PassHash is never handed to a template; it is

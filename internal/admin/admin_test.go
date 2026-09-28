@@ -47,6 +47,9 @@ func newTestServer(t *testing.T) (*store.Store, *Server) {
 	// The bundle inside the binary is whatever this checkout built; tests that
 	// care about the app files install their own.
 	srv.dist = fstest.MapFS{}
+	// The mount path is random per store; the suite speaks /admin, so it is
+	// pinned here in a way an operator cannot.
+	srv.path = "/admin"
 	return st, srv
 }
 
@@ -142,6 +145,57 @@ func rowsOf(t *testing.T, c *client) []any {
 	}
 	models, _ := jsonOf(t, rec)["models"].([]any)
 	return models
+}
+
+func TestPanelPathIsDrawnOnceAndSticks(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	hash, err := HashPassword(testPass)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateAdmin(testUser, hash); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+
+	mk := func() *Server {
+		t.Helper()
+		srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatalf("new server: %v", err)
+		}
+		srv.dist = fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte(`<div id="app">`)}}
+		return srv
+	}
+
+	first := mk()
+	if !strings.HasPrefix(first.Path(), "/") || len(first.Path()) != 1+panelPathLen {
+		t.Errorf("panel path = %q, want a %d-hex segment under /", first.Path(), panelPathLen)
+	}
+	if first.Path() == "/admin" {
+		t.Error("the panel kept the predictable path it used to have")
+	}
+
+	// A restart reads the same path back out of the store.
+	if again := mk(); again.Path() != first.Path() {
+		t.Errorf("restarted path = %q, want the stored %q", again.Path(), first.Path())
+	}
+
+	// The drawn path serves the app under itself.
+	h := first.Handler()
+	rec := getStatic(t, h, first.Path()+"/")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `<div id="app">`) {
+		t.Errorf("GET %s/ got %d: %s", first.Path(), rec.Code, rec.Body)
+	}
+
+	// The session cookie is scoped to the drawn path, not to the whole host.
+	rec = loginRequest(t, h, nil, first.Path()+"/api/login")
+	if set := rec.Header().Get("Set-Cookie"); !strings.Contains(set, "Path="+first.Path()) {
+		t.Errorf("cookie = %s, want Path=%s", set, first.Path())
+	}
 }
 
 func TestHashPasswordRefusesUnusableSecrets(t *testing.T) {
@@ -579,7 +633,7 @@ func TestSessionCookieFlagsFollowTheProxyScheme(t *testing.T) {
 
 	// Over plain http (a tunnel to 127.0.0.1) Secure must stay off, or the
 	// browser drops the cookie and the panel looks broken.
-	rec := loginRequest(t, h, nil)
+	rec := loginRequest(t, h, nil, "/admin/api/login")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login got %d: %s", rec.Code, rec.Body)
 	}
@@ -593,17 +647,17 @@ func TestSessionCookieFlagsFollowTheProxyScheme(t *testing.T) {
 	}
 
 	// Behind the front proxy the forwarded proto is what the browser used.
-	rec = loginRequest(t, h, http.Header{"X-Forwarded-Proto": {"https"}})
+	rec = loginRequest(t, h, http.Header{"X-Forwarded-Proto": {"https"}}, "/admin/api/login")
 	set := rec.Header().Get("Set-Cookie")
 	if !strings.Contains(set, "Secure") {
 		t.Errorf("proxied cookie missing Secure: %s", set)
 	}
 }
 
-func loginRequest(t *testing.T, h http.Handler, header http.Header) *httptest.ResponseRecorder {
+func loginRequest(t *testing.T, h http.Handler, header http.Header, target string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/api/login",
+	req := httptest.NewRequest(http.MethodPost, target,
 		strings.NewReader(`{"username":"`+testUser+`","password":"`+testPass+`"}`))
 	req.Header.Set("content-type", "application/json")
 	for k, vs := range header {

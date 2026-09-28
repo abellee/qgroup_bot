@@ -67,6 +67,7 @@ func run() error {
 	// to read a configuration from, so the router simply has no listeners.
 	var handlers []chat.Handler
 	var panel http.Handler
+	var panelPath string
 	if st != nil {
 		handlers = append(handlers, chat.NewModelReply(st, llm.New(httpModels), qq, log).HandleGroupMessage)
 
@@ -75,6 +76,10 @@ func run() error {
 			return fmt.Errorf("build admin panel: %w", err)
 		}
 		panel = server.Handler()
+		panelPath = server.Path()
+		// The path is drawn once by the store; printing it every start is how
+		// the operator finds the panel again.
+		log.Info("admin panel mounted", "path", panelPath)
 	}
 	router := chat.NewRouter(log, handlers...)
 
@@ -92,8 +97,9 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/qq/callback", handler)
 	if panel != nil {
-		mux.Handle("/admin", panel)
-		mux.Handle("/admin/", panel)
+		// The slashless form redirects to the subtree by the mux's own rule,
+		// which is also what keeps relative asset URLs resolving.
+		mux.Handle(panelPath+"/", panel)
 	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

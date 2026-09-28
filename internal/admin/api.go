@@ -116,7 +116,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dropSession(r)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: sessionPath, MaxAge: -1, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: s.path, MaxAge: -1, HttpOnly: true})
 	writeJSON(w, http.StatusOK, sessionDTO{Authenticated: false})
 }
 

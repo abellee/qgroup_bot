@@ -17,7 +17,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := strings.TrimPrefix(r.URL.Path, "/admin")
+	name := strings.TrimPrefix(r.URL.Path, s.path)
 	name = strings.TrimPrefix(name, "/")
 	if name == "" {
 		name = "index.html"

@@ -1,6 +1,8 @@
 // Package admin is the back-end the operator uses to point the bot at a model.
 // The browser side is a Vue single-page app built from web/; this package only
-// speaks JSON under /admin/api and serves the compiled bundle under /admin.
+// speaks JSON and serves the compiled bundle under a path of the panel's own -
+// a random segment drawn once and kept in the database, so the predictable
+// /admin of a directory scan finds nothing.
 package admin
 
 import (
@@ -24,8 +26,16 @@ import (
 
 const (
 	sessionCookie = "qgb_admin"
-	sessionPath   = "/admin"
 	sessionTTL    = 12 * time.Hour
+
+	// panelPathKey is the settings row that keeps the panel's random path
+	// stable across restarts, so the operator's bookmark keeps working.
+	panelPathKey = "panel_path"
+
+	// panelPathLen is the hex length of the random segment: 64 bits of
+	// unpredictability keep the panel out of directory scans, and the login
+	// throttle covers what a guesser does find.
+	panelPathLen = 16
 
 	// csrfHeader is what every mutating request must carry. The token comes from
 	// the session endpoint, so a third-party page cannot read it cross-origin.
@@ -45,6 +55,7 @@ type Server struct {
 	st       *store.Store
 	log      *slog.Logger
 	dist     fs.FS
+	path     string
 	mu       sync.Mutex
 	sess     map[string]*session
 	throttle map[string]*failedLogins
@@ -71,10 +82,33 @@ func New(st *store.Store, log *slog.Logger) (*Server, error) {
 		st:       st,
 		log:      log,
 		dist:     dist,
+		path:     panelPathOf(st, log),
 		sess:     map[string]*session{},
 		throttle: map[string]*failedLogins{},
 	}, nil
 }
+
+// panelPathOf is the segment the panel mounts under. It is drawn once and kept
+// in the settings table, so a restart does not invalidate the operator's
+// bookmark; a store that cannot hold it still serves, on an ephemeral path the
+// log names for this run.
+func panelPathOf(st *store.Store, log *slog.Logger) string {
+	stored, err := st.Setting(panelPathKey)
+	if err != nil {
+		log.Warn("panel path lookup failed, drawing an ephemeral one", "error", err)
+	} else if stored != "" {
+		return stored
+	}
+	path := "/" + randomToken()[:panelPathLen]
+	if err := st.SetSetting(panelPathKey, path); err != nil {
+		log.Warn("panel path could not be stored, it will change on next start", "error", err)
+	}
+	return path
+}
+
+// Path is the random segment the panel answers under, "/9f2c…" style. main
+// registers it with the outer mux; the startup log names it.
+func (s *Server) Path() string { return s.path }
 
 // HashPassword turns a plain password into what belongs in the database, which
 // is how the administrator from the env is stored at startup. bcrypt ignores
@@ -91,21 +125,22 @@ func HashPassword(plain string) (string, error) {
 	return string(hash), err
 }
 
-// Handler is the panel mounted under /admin.
+// Handler is the panel mounted under its own random path. main hands the outer
+// mux the subtree, so every route here carries that path in full.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/admin/api/login", s.handleLogin)
-	mux.HandleFunc("/admin/api/logout", s.authed(s.handleLogout))
-	mux.HandleFunc("/admin/api/session", s.handleSession)
-	mux.HandleFunc("/admin/api/models", s.authed(s.handleModels))
-	mux.HandleFunc("/admin/api/models/enable", s.authed(s.handleEnable))
-	mux.HandleFunc("/admin/api/models/delete", s.authed(s.handleDelete))
-	mux.HandleFunc("/admin/api/providers", s.authed(s.handleProviders))
+	mux.HandleFunc(s.path+"/api/login", s.handleLogin)
+	mux.HandleFunc(s.path+"/api/logout", s.authed(s.handleLogout))
+	mux.HandleFunc(s.path+"/api/session", s.handleSession)
+	mux.HandleFunc(s.path+"/api/models", s.authed(s.handleModels))
+	mux.HandleFunc(s.path+"/api/models/enable", s.authed(s.handleEnable))
+	mux.HandleFunc(s.path+"/api/models/delete", s.authed(s.handleDelete))
+	mux.HandleFunc(s.path+"/api/providers", s.authed(s.handleProviders))
 
 	// Everything else is the bundle: the app itself and its hashed assets.
-	mux.HandleFunc("/admin/", s.serveStatic)
-	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/admin/", http.StatusFound)
+	mux.HandleFunc(s.path+"/", s.serveStatic)
+	mux.HandleFunc(s.path, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, s.path+"/", http.StatusFound)
 	})
 	return mux
 }
@@ -178,7 +213,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, adminID in
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
-		Path:     sessionPath,
+		Path:     s.path,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   requestIsHTTPS(r),

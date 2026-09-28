@@ -1,4 +1,7 @@
-const base = '/admin/api'
+// The panel mounts under a random path only the server knows, so the API base
+// follows the page: the app is always served at the mount root, and the
+// slashless form of the path redirects there before anything loads.
+const base = window.location.pathname.replace(/\/+$/, '') + '/api'
 
 // The csrf token comes from the session endpoint and is echoed on every mutation.
 // It lives in a module variable rather than localStorage: the session cookie is
