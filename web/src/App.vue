@@ -10,17 +10,23 @@ import ModelsView from '@/views/ModelsView.vue'
 const state = ref('loading')
 const username = ref('')
 const accountOpen = ref(false)
+const turnstileKey = ref('')
 
 function apply(session) {
   if (session && session.authenticated) {
     setCSRF(session.csrf)
     username.value = session.username
     state.value = 'authed'
-    return
+  } else {
+    setCSRF('')
+    username.value = ''
+    state.value = 'anonymous'
   }
-  setCSRF('')
-  username.value = ''
-  state.value = 'anonymous'
+  // The site key arrives with every session probe; manual sign-outs pass no
+  // session object, and the key the login page needs must survive those.
+  if (session && session.turnstile_site_key !== undefined) {
+    turnstileKey.value = session.turnstile_site_key
+  }
 }
 
 function signOut() {
@@ -48,7 +54,7 @@ onMounted(async () => {
 <template>
   <div v-if="state === 'loading'" class="skeleton">正在检查登录状态…</div>
 
-  <LoginView v-else-if="state === 'anonymous'" @signed-in="apply" />
+  <LoginView v-else-if="state === 'anonymous'" :site-key="turnstileKey" @signed-in="apply" />
 
   <div v-else>
     <header class="topbar">

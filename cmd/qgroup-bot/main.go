@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -72,7 +77,18 @@ func run() error {
 	if st != nil {
 		handlers = append(handlers, chat.NewModelReply(st, completer, qq, log).HandleGroupMessage)
 
-		server, err := admin.New(st, log, panelTester{client: completer})
+		// Turnstile only arms when both keys are set; half a pair is ignored
+		// loudly rather than half-enforced.
+		var human admin.HumanCheck
+		siteKey := cfg.TurnstileSiteKey
+		if cfg.TurnstileSiteKey != "" && cfg.TurnstileSecretKey != "" {
+			human = turnstileCheck{secret: cfg.TurnstileSecretKey, client: httpUpstream}
+		} else if siteKey != "" {
+			siteKey = ""
+			log.Warn("turnstile keys are half-set, the login form stays password-only")
+		}
+
+		server, err := admin.New(st, log, panelTester{client: completer}, human, siteKey)
 		if err != nil {
 			return fmt.Errorf("build admin panel: %w", err)
 		}
@@ -150,6 +166,51 @@ func (p panelTester) TestModel(ctx context.Context, cfg store.ModelConfig, promp
 
 func (p panelTester) ListModels(ctx context.Context, cfg store.ModelConfig) ([]string, error) {
 	return p.client.ListModels(ctx, chat.ConfigOf(&cfg))
+}
+
+// turnstileCheck verifies a Turnstile token against Cloudflare's siteverify
+// endpoint. The endpoint is a field so the test can point it at a stub.
+type turnstileCheck struct {
+	secret   string
+	endpoint string
+	client   *http.Client
+}
+
+func (t turnstileCheck) Verify(ctx context.Context, token, remoteIP string) error {
+	if token == "" {
+		return errors.New("missing token")
+	}
+	endpoint := t.endpoint
+	if endpoint == "" {
+		endpoint = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+	}
+	form := url.Values{
+		"secret":   {t.secret},
+		"response": {token},
+		"remoteip": {remoteIP},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("content-type", "application/x-www-form-urlencoded")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("siteverify unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Success    bool     `json:"success"`
+		ErrorCodes []string `json:"error-codes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return fmt.Errorf("siteverify response unreadable: %w", err)
+	}
+	if !out.Success {
+		return fmt.Errorf("rejected: %v", out.ErrorCodes)
+	}
+	return nil
 }
 
 // ensureAdmin stores the first administrator from the env. It runs once: after

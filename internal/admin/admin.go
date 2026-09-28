@@ -48,6 +48,13 @@ const (
 	loginLockout    = 10 * time.Minute
 )
 
+// HumanCheck verifies a Cloudflare Turnstile token from the login form. A nil
+// check means the panel runs without one and login works as before, which is
+// how a private test instance stays simple.
+type HumanCheck interface {
+	Verify(ctx context.Context, token, remoteIP string) error
+}
+
 // Tester is the pair of calls behind the panel's dialogs: replaying one turn
 // against a stored row, and pulling the model catalog a provider offers. main
 // wires both to the llm client; the panel never sees a provider's request shape.
@@ -65,6 +72,8 @@ type Server struct {
 	dist     fs.FS
 	path     string
 	tester   Tester
+	human    HumanCheck
+	siteKey  string
 	mu       sync.Mutex
 	sess     map[string]*session
 	throttle map[string]*failedLogins
@@ -82,7 +91,7 @@ type failedLogins struct {
 	until time.Time
 }
 
-func New(st *store.Store, log *slog.Logger, tester Tester) (*Server, error) {
+func New(st *store.Store, log *slog.Logger, tester Tester, human HumanCheck, turnstileSiteKey string) (*Server, error) {
 	dist, err := web.Dist()
 	if err != nil {
 		return nil, err
@@ -93,6 +102,8 @@ func New(st *store.Store, log *slog.Logger, tester Tester) (*Server, error) {
 		dist:     dist,
 		path:     panelPathOf(st, log),
 		tester:   tester,
+		human:    human,
+		siteKey:  turnstileSiteKey,
 		sess:     map[string]*session{},
 		throttle: map[string]*failedLogins{},
 	}, nil

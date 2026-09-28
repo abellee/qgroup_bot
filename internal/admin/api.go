@@ -79,8 +79,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -90,6 +91,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if wait := s.lockedFor(addr); wait > 0 {
 		writeError(w, http.StatusTooManyRequests, "失败次数过多，请 "+fmtWait(wait)+" 后重试")
 		return
+	}
+
+	// The human check sits between the throttle and the credentials: a token
+	// that does not verify never reaches the password, and a throttled address
+	// is not charged turnstile quota.
+	if s.human != nil {
+		if err := s.human.Verify(r.Context(), in.TurnstileToken, addr); err != nil {
+			s.log.Warn("login refused by the human check", "addr", addr, "error", err)
+			writeError(w, http.StatusForbidden, "人机验证未通过，请刷新后重试")
+			return
+		}
 	}
 
 	name := strings.TrimSpace(in.Username)
@@ -112,7 +124,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.noteSuccess(addr)
 	sess := s.startSession(w, r, admin.ID, admin.Username)
 	s.log.Info("admin login", "username", admin.Username, "addr", addr)
-	writeJSON(w, http.StatusOK, sessionDTO{Authenticated: true, Username: sess.username, CSRF: sess.csrf})
+	writeJSON(w, http.StatusOK, s.sessionDTOOf(sess))
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -122,15 +134,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	s.dropSession(r)
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: s.path, MaxAge: -1, HttpOnly: true})
-	writeJSON(w, http.StatusOK, sessionDTO{Authenticated: false})
+	writeJSON(w, http.StatusOK, s.sessionDTOOf(nil))
 }
 
 // sessionDTO answers the one question the app asks before it renders anything:
-// is there a session, and what token must its requests carry.
+// is there a session, what token must its requests carry, and - for the login
+// page - whether a Turnstile widget is part of the deal.
 type sessionDTO struct {
-	Authenticated bool   `json:"authenticated"`
-	Username      string `json:"username,omitempty"`
-	CSRF          string `json:"csrf,omitempty"`
+	Authenticated    bool   `json:"authenticated"`
+	Username         string `json:"username,omitempty"`
+	CSRF             string `json:"csrf,omitempty"`
+	TurnstileSiteKey string `json:"turnstile_site_key,omitempty"`
 }
 
 // handleSession is deliberately not behind authed: an unauthenticated answer is
@@ -142,10 +156,24 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := s.session(r)
 	if sess == nil {
-		writeJSON(w, http.StatusOK, sessionDTO{Authenticated: false})
+		writeJSON(w, http.StatusOK, s.sessionDTOOf(nil))
 		return
 	}
-	writeJSON(w, http.StatusOK, sessionDTO{Authenticated: true, Username: sess.username, CSRF: sess.csrf})
+	writeJSON(w, http.StatusOK, s.sessionDTOOf(sess))
+}
+
+func (s *Server) sessionDTOOf(sess *session) sessionDTO {
+	out := sessionDTO{}
+	if s.human != nil {
+		out.TurnstileSiteKey = s.siteKey
+	}
+	if sess == nil {
+		return out
+	}
+	out.Authenticated = true
+	out.Username = sess.username
+	out.CSRF = sess.csrf
+	return out
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {

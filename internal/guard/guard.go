@@ -79,11 +79,14 @@ func (g *Guard) stamp(h http.Header) {
 	h.Set("x-content-type-options", "nosniff")
 	h.Set("x-frame-options", "deny")
 	h.Set("referrer-policy", "no-referrer")
-	// The panel is a same-origin app: nothing may frame it, and scripts only
-	// ever load from the bundle's own host.
+	// The panel is a same-origin app: nothing may frame it, scripts load only
+	// from the bundle's own host - plus Cloudflare's, because the login form
+	// embeds their Turnstile widget.
 	h.Set("content-security-policy",
-		"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
-			"frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		"default-src 'self'; script-src 'self' https://challenges.cloudflare.com; "+
+			"style-src 'self' 'unsafe-inline'; img-src 'self' data:; "+
+			"frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; "+
+			"base-uri 'none'; form-action 'self'")
 }
 
 func (g *Guard) boxed(addr string) bool {

@@ -44,7 +44,8 @@ async function request(path, { method = 'GET', body } = {}) {
 
 export const api = {
   session: () => request('/session'),
-  login: (username, password) => request('/login', { method: 'POST', body: { username, password } }),
+  login: (username, password, turnstileToken) =>
+    request('/login', { method: 'POST', body: { username, password, turnstile_token: turnstileToken || undefined } }),
   logout: () => request('/logout', { method: 'POST', body: {} }),
   providers: () => request('/providers'),
   models: () => request('/models'),

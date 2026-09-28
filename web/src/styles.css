@@ -182,6 +182,7 @@ textarea { min-height: 108px; resize: vertical; }
 .login-card h1 { font-size: 17px; margin: 0 0 4px; }
 .login-card p.sub { margin: 0 0 18px; color: var(--faint); font-size: 13px; }
 .login-card button { width: 100%; }
+.turnstile-slot { margin-bottom: 14px; }
 
 /* ---------- messages ---------- */
 .msg { padding: 9px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }

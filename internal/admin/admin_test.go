@@ -50,6 +50,24 @@ func (s *stubTester) ListModels(_ context.Context, cfg store.ModelConfig) ([]str
 	return s.ids, s.err
 }
 
+// stubHuman stands in for the Turnstile check: it records what the login form
+// presented and passes or fails on demand.
+type stubHuman struct {
+	accept    bool
+	calls     int
+	lastToken string
+	lastIP    string
+}
+
+func (h *stubHuman) Verify(_ context.Context, token, remoteIP string) error {
+	h.calls++
+	h.lastToken, h.lastIP = token, remoteIP
+	if h.accept {
+		return nil
+	}
+	return errors.New("rejected: [invalid-input-response]")
+}
+
 func newTestServer(t *testing.T) (*store.Store, *Server) {
 	t.Helper()
 
@@ -67,7 +85,7 @@ func newTestServer(t *testing.T) (*store.Store, *Server) {
 		t.Fatalf("create admin: %v", err)
 	}
 
-	srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), &stubTester{answer: "测试回答"})
+	srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), &stubTester{answer: "测试回答"}, nil, "")
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -190,7 +208,7 @@ func TestPanelPathIsDrawnOnceAndSticks(t *testing.T) {
 
 	mk := func() *Server {
 		t.Helper()
-		srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), &stubTester{answer: "ok"})
+		srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), &stubTester{answer: "ok"}, nil, "")
 		if err != nil {
 			t.Fatalf("new server: %v", err)
 		}
@@ -756,6 +774,70 @@ func TestAccountUpdateRefusesAnOverLongPassword(t *testing.T) {
 	c2 := newClient(t, srv)
 	if rec = c2.do(http.MethodPost, "/admin/api/login", map[string]string{"username": testUser, "password": testPass}); rec.Code != http.StatusOK {
 		t.Errorf("login with the untouched password got %d, want 200", rec.Code)
+	}
+}
+
+// With a human check armed, the login form must present a token the check
+// accepts, and the session probe names the site key the widget needs.
+func TestLoginArmsTheHumanCheck(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	hash, err := HashPassword(testPass)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := st.CreateAdmin(testUser, hash); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+
+	human := &stubHuman{accept: false}
+	srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&stubTester{answer: "ok"}, human, "site-key-1")
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	srv.dist = fstest.MapFS{}
+	srv.path = "/admin"
+	c := newClient(t, srv)
+
+	// The probe hands the widget its key before any login happens.
+	rec := c.do(http.MethodGet, "/admin/api/session", nil)
+	if got := jsonOf(t, rec)["turnstile_site_key"]; got != "site-key-1" {
+		t.Errorf("turnstile_site_key = %v, want the configured key", got)
+	}
+
+	// A wrong token never reaches the credentials.
+	rec = c.do(http.MethodPost, "/admin/api/login", map[string]string{
+		"username": testUser, "password": testPass, "turnstile_token": "tok-bad",
+	})
+	if rec.Code != http.StatusForbidden || !strings.Contains(errText(t, rec), "人机验证") {
+		t.Fatalf("login with a bad token got %d: %s", rec.Code, rec.Body)
+	}
+	if rec.Header().Get("Set-Cookie") != "" {
+		t.Error("a session was handed out past a refused token")
+	}
+
+	// The token and the caller's address are what the check was given.
+	human.accept = true
+	rec = c.do(http.MethodPost, "/admin/api/login", map[string]string{
+		"username": testUser, "password": testPass, "turnstile_token": "tok-good",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login with a good token got %d: %s", rec.Code, rec.Body)
+	}
+	if human.lastToken != "tok-good" || human.lastIP != "10.0.0.1" {
+		t.Errorf("the check saw token %q from %q", human.lastToken, human.lastIP)
+	}
+	if human.calls != 2 {
+		t.Errorf("the check ran %d times, want one per attempt", human.calls)
+	}
+
+	// The token is not stored or echoed anywhere it does not belong.
+	if strings.Contains(rec.Body.String(), "tok-good") {
+		t.Error("the login response echoed the turnstile token")
 	}
 }
 
