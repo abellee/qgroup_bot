@@ -21,6 +21,7 @@ const form = reactive({
   api_key: '',
   model: props.row ? props.row.model : '',
   persona: props.row ? props.row.persona : '',
+  fallback_replies: props.row ? props.row.fallback_replies || '' : '',
   temperature: props.row ? props.row.temperature : 1,
   max_tokens: props.row ? props.row.max_tokens : 1024,
   timeout_ms: props.row ? props.row.timeout_ms : 45000,
@@ -36,12 +37,14 @@ const keyGiven = computed(() => !!(props.row && props.row.key_given))
 const remoteLoading = ref(false)
 const remoteModels = ref([])
 const remoteError = ref('')
+const pickedModel = ref('')
 
 async function pullModels() {
   if (remoteLoading.value) return
   remoteLoading.value = true
   remoteError.value = ''
   remoteModels.value = []
+  pickedModel.value = ''
   try {
     const out = await api.remoteModels({
       id: form.id,
@@ -56,6 +59,14 @@ async function pullModels() {
   } finally {
     remoteLoading.value = false
   }
+}
+
+// A real select instead of a datalist: datalist entries get filtered by the text
+// already in the input, and the operator wants to see everything the provider
+// offers, unchanged.
+function pickModel(e) {
+  pickedModel.value = e.target.value
+  form.model = e.target.value
 }
 
 // What the request path will look like for the chosen provider, so a wrong base
@@ -122,13 +133,13 @@ function onKeydown(e) {
         <label>
           <span>模型</span>
           <div class="with-btn">
-            <input v-model="form.model" type="text" list="remote-model-options" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-flash">
+            <input v-model="form.model" type="text" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-flash">
             <button type="button" class="plain" :disabled="remoteLoading" @click="pullModels">{{ remoteLoading ? '拉取中…' : '获取列表' }}</button>
           </div>
-          <datalist id="remote-model-options">
-            <option v-for="m in remoteModels" :key="m" :value="m"></option>
-          </datalist>
-          <span v-if="remoteModels.length" class="hint">上游返回 {{ remoteModels.length }} 个模型，点击输入框即可选择</span>
+          <select v-if="remoteModels.length" class="model-pick" :value="pickedModel" @change="pickModel">
+            <option value="" disabled>从上游的 {{ remoteModels.length }} 个模型里选择…</option>
+            <option v-for="m in remoteModels" :key="m" :value="m">{{ m }}</option>
+          </select>
           <span v-if="remoteError" class="hint err">{{ remoteError }}</span>
         </label>
 
@@ -136,6 +147,12 @@ function onKeydown(e) {
           <span>人设（system 提示词）</span>
           <textarea v-model="form.persona" placeholder="你是 QQ 群的助手，回答要短、口语化，不要用 markdown 标题。"></textarea>
           <span class="hint">每次 @机器人 只带这一句人设和群里那句话，不记录历史。</span>
+        </label>
+
+        <label>
+          <span>接口报错时的候选回复（一行一条）</span>
+          <textarea v-model="form.fallback_replies" placeholder="模型临时开小差了，稍后再 @ 我试试"></textarea>
+          <span class="hint">调用失败或返回为空时，随机挑一条发进群；留空则保持安静。</span>
         </label>
 
         <div class="grid-3">

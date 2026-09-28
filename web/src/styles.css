@@ -170,6 +170,7 @@ textarea { min-height: 108px; resize: vertical; }
 .with-btn { display: flex; gap: 8px; }
 .with-btn input { flex: 1; min-width: 0; }
 .with-btn button { flex: none; white-space: nowrap; }
+.with-btn + select { margin-top: 8px; }
 .hint.err { color: var(--warn); }
 .check { display: flex; align-items: center; gap: 9px; }
 .check input { width: auto; }
