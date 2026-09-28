@@ -122,8 +122,14 @@ func (g *Guard) miss(addr string) {
 }
 
 // ClientAddr prefers the forwarded address, because behind the front proxy
-// every request's RemoteAddr is the proxy itself.
+// every request's RemoteAddr is the proxy itself. Behind Cloudflare the edge
+// names the real client in CF-Connecting-IP, which wins outright: a client can
+// stuff the first hop of X-Forwarded-For, and the login throttle must not be
+// fooled by that.
 func ClientAddr(r *http.Request) string {
+	if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
+		return cf
+	}
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		if first, _, _ := strings.Cut(fwd, ","); strings.TrimSpace(first) != "" {
 			return strings.TrimSpace(first)

@@ -133,4 +133,11 @@ func TestClientAddrPrefersTheForwardedHost(t *testing.T) {
 	if got := ClientAddr(req); got != "203.0.113.5" {
 		t.Errorf("ClientAddr = %q, want the forwarded client", got)
 	}
+
+	// Behind Cloudflare the edge's own header wins over anything the client
+	// stuffed into X-Forwarded-For.
+	req.Header.Set("CF-Connecting-IP", "198.51.100.7")
+	if got := ClientAddr(req); got != "198.51.100.7" {
+		t.Errorf("ClientAddr = %q, want the cloudflare-verified client", got)
+	}
 }
