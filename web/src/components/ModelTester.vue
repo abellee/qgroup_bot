@@ -42,7 +42,7 @@ function onKeydown(e) {
 </script>
 
 <template>
-  <div class="scrim" @keydown="onKeydown" @click.self="emit('close')">
+  <div class="scrim" @keydown="onKeydown">
     <section class="sheet" role="dialog" aria-modal="true">
       <div class="sheet-head">
         <h2>测试「{{ row.name }}」</h2>

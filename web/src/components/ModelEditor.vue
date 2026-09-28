@@ -57,7 +57,7 @@ function onKeydown(e) {
 </script>
 
 <template>
-  <div class="scrim" @keydown="onKeydown" @click.self="emit('close')">
+  <div class="scrim" @keydown="onKeydown">
     <section class="sheet" role="dialog" aria-modal="true">
       <div class="sheet-head">
         <h2>{{ form.id ? '编辑模型配置' : '新增模型配置' }}</h2>
