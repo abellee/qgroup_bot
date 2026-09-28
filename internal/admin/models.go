@@ -39,7 +39,6 @@ func (s *Server) handleForm(w http.ResponseWriter, r *http.Request) {
 
 	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 	if err != nil || id == 0 {
-		data.IsNew = true
 		data.Form = &modelView{Temperature: "1", MaxTokens: "1024", TimeoutMS: "45000", Provider: store.ProviderOpenAI}
 		s.render(w, "form", data)
 		return
@@ -70,7 +69,6 @@ func (s *Server) handleSave(w http.ResponseWriter, r *http.Request) {
 	}
 	data := s.newPage(s.session(r), "模型配置")
 	cfg := s.formConfig(r)
-	data.IsNew = cfg.ID == 0
 
 	if cfg.ID != 0 {
 		existing, err := s.st.GetModel(cfg.ID)

@@ -20,7 +20,6 @@ type pageData struct {
 	Providers []providerOption
 	Models    []modelView
 	Form      *modelView
-	IsNew     bool
 }
 
 type providerOption struct {
