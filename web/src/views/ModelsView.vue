@@ -108,6 +108,10 @@ function time(text) {
   const d = new Date(text)
   return Number.isNaN(d.getTime()) ? text : d.toLocaleString('zh-CN', { hour12: false })
 }
+
+function fallbackCount(row) {
+  return (row.fallback_replies || '').split('\n').filter((s) => s.trim()).length
+}
 </script>
 
 <template>
@@ -153,6 +157,7 @@ function time(text) {
           <div class="row-meta">
             Key {{ row.key_masked }}
             <template v-if="row.persona"> · 人设 {{ row.persona.length > 24 ? row.persona.slice(0, 24) + '…' : row.persona }}</template>
+            <template v-if="fallbackCount(row)"> · 托底 {{ fallbackCount(row) }} 条</template>
           </div>
         </div>
 

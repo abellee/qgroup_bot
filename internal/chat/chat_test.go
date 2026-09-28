@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -185,6 +186,66 @@ func TestCallFailureSendsNothing(t *testing.T) {
 	broken.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2", "问题"))
 	if got := len(replies.sent()); got != 0 {
 		t.Errorf("replies = %+v, want none when storage fails", got)
+	}
+}
+
+// A row with fallback lines answers a failed call with one of them, drawn at
+// random, instead of leaving the room in silence.
+func TestFailureRepliesWithARandomFallback(t *testing.T) {
+	replies := &replyStub{}
+	failing := &completeStub{err: errors.New("http 500")}
+	cfg := activeConfig()
+	cfg.FallbackReplies = "第一条\n  \n第二条\n第三条"
+	reply := NewModelReply(&modelStub{cfg: cfg, ok: true}, failing, replies, discardLogger())
+	ctx := context.Background()
+
+	allowed := map[string]bool{"第一条": true, "第二条": true, "第三条": true}
+	distinct := map[string]bool{}
+	for i := 1; i <= 8; i++ {
+		id := fmt.Sprintf("msg-%d", i)
+		reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", id, "问题"))
+	}
+
+	sent := replies.sent()
+	if len(sent) != 8 {
+		t.Fatalf("replies = %+v, want one fallback per failed call", sent)
+	}
+	for i, s := range sent {
+		if s.Group != "g1" || s.MsgID != fmt.Sprintf("msg-%d", i+1) {
+			t.Errorf("reply = %+v, want it anchored to its own mention", s)
+		}
+		if !allowed[s.Markdown] {
+			t.Errorf("reply = %q, want one of the configured lines", s.Markdown)
+		}
+		distinct[s.Markdown] = true
+	}
+	if len(distinct) < 2 {
+		t.Errorf("replies = %v, want the draw to vary across attempts", sent)
+	}
+}
+
+// A list with nothing but whitespace has no candidates, and an empty answer is
+// treated like a failure: same fallback, same anchoring.
+func TestFallbackEdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	quiet := &replyStub{}
+	cfg := activeConfig()
+	cfg.FallbackReplies = " \n\t\n"
+	NewModelReply(&modelStub{cfg: cfg, ok: true}, &completeStub{err: errors.New("down")}, quiet, discardLogger()).
+		HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "问题"))
+	if got := len(quiet.sent()); got != 0 {
+		t.Errorf("replies = %+v, want silence with no usable line", got)
+	}
+
+	spoke := &replyStub{}
+	cfg.FallbackReplies = "模型走神了，再 @ 我一次"
+	// The real providers trim before returning, so an empty answer arrives as "".
+	NewModelReply(&modelStub{cfg: cfg, ok: true}, &completeStub{answer: ""}, spoke, discardLogger()).
+		HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2", "问题"))
+	sent := spoke.sent()
+	if len(sent) != 1 || sent[0].Markdown != "模型走神了，再 @ 我一次" || sent[0].MsgID != "msg-2" {
+		t.Errorf("replies = %+v, want the single fallback line on the mention", sent)
 	}
 }
 

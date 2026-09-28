@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS model_configs (
 	api_key     TEXT NOT NULL,
 	model       TEXT NOT NULL,
 	persona     TEXT NOT NULL DEFAULT '',
+	fallback_replies TEXT NOT NULL DEFAULT '',
 	temperature REAL NOT NULL DEFAULT 1,
 	max_tokens  INTEGER NOT NULL DEFAULT 1024,
 	timeout_ms  INTEGER NOT NULL DEFAULT 45000,
@@ -83,6 +84,26 @@ CREATE TABLE IF NOT EXISTS settings (
 func (s *Store) migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate sqlite schema: %w", err)
+	}
+	// CREATE TABLE IF NOT EXISTS cannot widen a table an older build made, so
+	// columns added later are attached here one by one.
+	if err := s.addColumn("model_configs", "fallback_replies", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) addColumn(table, column, definition string) error {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&n); err != nil {
+		return fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return nil
 }

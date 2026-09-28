@@ -443,7 +443,8 @@ func TestModelRoundTripThroughTheAPI(t *testing.T) {
 	rec := c.do(http.MethodPost, "/admin/api/models", map[string]any{
 		"id": 0, "name": "备用", "provider": "Anthropic", "base_url": "https://api.anthropic.com",
 		"api_key": "sk-ant-1234567890", "model": "claude-test", "persona": "回答要短",
-		"temperature": 0.3, "max_tokens": 512, "timeout_ms": 30000, "enabled": true,
+		"fallback_replies": "第一条\n第二条",
+		"temperature":      0.3, "max_tokens": 512, "timeout_ms": 30000, "enabled": true,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("create got %d: %s", rec.Code, rec.Body)
@@ -451,6 +452,9 @@ func TestModelRoundTripThroughTheAPI(t *testing.T) {
 	created := jsonOf(t, rec)
 	if created["provider"] != store.ProviderAnthropic {
 		t.Errorf("provider = %v, want the lowercased choice", created["provider"])
+	}
+	if created["fallback_replies"] != "第一条\n第二条" {
+		t.Errorf("fallback_replies = %v, want the saved lines back", created["fallback_replies"])
 	}
 	if created["enabled"] != true {
 		t.Error("the checked row came back inactive")

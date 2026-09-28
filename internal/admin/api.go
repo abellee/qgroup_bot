@@ -20,53 +20,56 @@ import (
 // only the mask and whether one exists, so an edit can leave the field blank to
 // mean "keep what is there".
 type modelDTO struct {
-	ID          int64   `json:"id"`
-	Name        string  `json:"name"`
-	Provider    string  `json:"provider"`
-	BaseURL     string  `json:"base_url"`
-	KeyMasked   string  `json:"key_masked"`
-	KeyGiven    bool    `json:"key_given"`
-	Model       string  `json:"model"`
-	Persona     string  `json:"persona"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
-	TimeoutMS   int     `json:"timeout_ms"`
-	Enabled     bool    `json:"enabled"`
-	UpdatedAt   string  `json:"updated_at"`
+	ID              int64   `json:"id"`
+	Name            string  `json:"name"`
+	Provider        string  `json:"provider"`
+	BaseURL         string  `json:"base_url"`
+	KeyMasked       string  `json:"key_masked"`
+	KeyGiven        bool    `json:"key_given"`
+	Model           string  `json:"model"`
+	Persona         string  `json:"persona"`
+	FallbackReplies string  `json:"fallback_replies"`
+	Temperature     float64 `json:"temperature"`
+	MaxTokens       int     `json:"max_tokens"`
+	TimeoutMS       int     `json:"timeout_ms"`
+	Enabled         bool    `json:"enabled"`
+	UpdatedAt       string  `json:"updated_at"`
 }
 
 func dtoOf(m *store.ModelConfig) modelDTO {
 	return modelDTO{
-		ID:          m.ID,
-		Name:        m.Name,
-		Provider:    m.Provider,
-		BaseURL:     m.BaseURL,
-		KeyMasked:   maskKey(m.APIKey),
-		KeyGiven:    strings.TrimSpace(m.APIKey) != "",
-		Model:       m.Model,
-		Persona:     m.Persona,
-		Temperature: m.Temperature,
-		MaxTokens:   m.MaxTokens,
-		TimeoutMS:   m.TimeoutMS,
-		Enabled:     m.Enabled,
-		UpdatedAt:   m.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:              m.ID,
+		Name:            m.Name,
+		Provider:        m.Provider,
+		BaseURL:         m.BaseURL,
+		KeyMasked:       maskKey(m.APIKey),
+		KeyGiven:        strings.TrimSpace(m.APIKey) != "",
+		Model:           m.Model,
+		Persona:         m.Persona,
+		FallbackReplies: m.FallbackReplies,
+		Temperature:     m.Temperature,
+		MaxTokens:       m.MaxTokens,
+		TimeoutMS:       m.TimeoutMS,
+		Enabled:         m.Enabled,
+		UpdatedAt:       m.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
 // saveRequest is the edit form. APIKey is the only field where blank means
 // something other than "empty": on an existing row it means unchanged.
 type saveRequest struct {
-	ID          int64   `json:"id"`
-	Name        string  `json:"name"`
-	Provider    string  `json:"provider"`
-	BaseURL     string  `json:"base_url"`
-	APIKey      string  `json:"api_key"`
-	Model       string  `json:"model"`
-	Persona     string  `json:"persona"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
-	TimeoutMS   int     `json:"timeout_ms"`
-	Enabled     bool    `json:"enabled"`
+	ID              int64   `json:"id"`
+	Name            string  `json:"name"`
+	Provider        string  `json:"provider"`
+	BaseURL         string  `json:"base_url"`
+	APIKey          string  `json:"api_key"`
+	Model           string  `json:"model"`
+	Persona         string  `json:"persona"`
+	FallbackReplies string  `json:"fallback_replies"`
+	Temperature     float64 `json:"temperature"`
+	MaxTokens       int     `json:"max_tokens"`
+	TimeoutMS       int     `json:"timeout_ms"`
+	Enabled         bool    `json:"enabled"`
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -174,17 +177,18 @@ func (s *Server) saveModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := store.ModelConfig{
-		ID:          in.ID,
-		Name:        strings.TrimSpace(in.Name),
-		Provider:    strings.ToLower(strings.TrimSpace(in.Provider)),
-		BaseURL:     strings.TrimSpace(in.BaseURL),
-		APIKey:      strings.TrimSpace(in.APIKey),
-		Model:       strings.TrimSpace(in.Model),
-		Persona:     in.Persona,
-		Temperature: in.Temperature,
-		MaxTokens:   in.MaxTokens,
-		TimeoutMS:   in.TimeoutMS,
-		Enabled:     in.Enabled,
+		ID:              in.ID,
+		Name:            strings.TrimSpace(in.Name),
+		Provider:        strings.ToLower(strings.TrimSpace(in.Provider)),
+		BaseURL:         strings.TrimSpace(in.BaseURL),
+		APIKey:          strings.TrimSpace(in.APIKey),
+		Model:           strings.TrimSpace(in.Model),
+		Persona:         in.Persona,
+		FallbackReplies: strings.TrimSpace(in.FallbackReplies),
+		Temperature:     in.Temperature,
+		MaxTokens:       in.MaxTokens,
+		TimeoutMS:       in.TimeoutMS,
+		Enabled:         in.Enabled,
 	}
 
 	if cfg.ID != 0 {

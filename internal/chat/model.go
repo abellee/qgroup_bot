@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -93,10 +94,12 @@ func (r *ModelReply) HandleGroupMessage(ctx context.Context, ev *qqbot.GroupMess
 	answer, err := r.llm.Complete(ctx, ConfigOf(cfg), prompt)
 	if err != nil {
 		r.log.Error("model call failed", append(logFields, "error", err, "took", time.Since(start).String())...)
+		r.replyFallback(ctx, ev, cfg, logFields)
 		return
 	}
 	if answer == "" {
 		r.log.Info("model returned nothing", append(logFields, "took", time.Since(start).String())...)
+		r.replyFallback(ctx, ev, cfg, logFields)
 		return
 	}
 
@@ -105,6 +108,36 @@ func (r *ModelReply) HandleGroupMessage(ctx context.Context, ev *qqbot.GroupMess
 		return
 	}
 	r.log.Info("reply sent", append(logFields, "runes", utf8.RuneCountInString(answer), "took", time.Since(start).String())...)
+}
+
+// replyFallback answers a failed or empty model call with one of the row's
+// fallback lines, drawn at random. A row without any keeps the old behaviour:
+// the failure stays in the logs and the group sees nothing.
+func (r *ModelReply) replyFallback(ctx context.Context, ev *qqbot.GroupMessageEvent, cfg *store.ModelConfig, logFields []any) {
+	line := pickFallback(cfg.FallbackReplies)
+	if line == "" {
+		return
+	}
+	if err := r.qq.ReplyGroupMarkdown(ctx, ev.GroupOpenID, ev.ID, truncate(line)); err != nil {
+		r.log.Error("fallback reply send failed", append(logFields, "error", err)...)
+		return
+	}
+	r.log.Info("fallback reply sent", append(logFields, "runes", utf8.RuneCountInString(line))...)
+}
+
+// pickFallback draws one non-empty line of the list at random. Whitespace-only
+// lines are not candidates, so an entry can be blanked out without deleting it.
+func pickFallback(list string) string {
+	var lines []string
+	for _, line := range strings.Split(list, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[rand.IntN(len(lines))]
 }
 
 func truncate(s string) string {

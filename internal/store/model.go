@@ -28,18 +28,21 @@ func ValidProvider(p string) bool {
 // ModelConfig is one entry of the 模型 menu: the credentials, the persona, and
 // the sampling knobs needed to actually call the provider.
 type ModelConfig struct {
-	ID          int64
-	Name        string
-	Provider    string
-	BaseURL     string
-	APIKey      string
-	Model       string
-	Persona     string
-	Temperature float64
-	MaxTokens   int
-	TimeoutMS   int
-	Enabled     bool
-	UpdatedAt   time.Time
+	ID       int64
+	Name     string
+	Provider string
+	BaseURL  string
+	APIKey   string
+	Model    string
+	Persona  string
+	// FallbackReplies holds one reply per line; when the provider call fails,
+	// the group gets one of them at random instead of silence.
+	FallbackReplies string
+	Temperature     float64
+	MaxTokens       int
+	TimeoutMS       int
+	Enabled         bool
+	UpdatedAt       time.Time
 }
 
 // Clamp defaults the knobs an empty form leaves behind, so a row saved from the
@@ -93,7 +96,7 @@ func (m *ModelConfig) Validate() error {
 }
 
 func (s *Store) ListModels() ([]ModelConfig, error) {
-	rows, err := s.db.Query(`SELECT id, name, provider, base_url, api_key, model, persona,
+	rows, err := s.db.Query(`SELECT id, name, provider, base_url, api_key, model, persona, fallback_replies,
 		temperature, max_tokens, timeout_ms, enabled, updated_at
 		FROM model_configs ORDER BY enabled DESC, name`)
 	if err != nil {
@@ -109,7 +112,7 @@ func (s *Store) ListModels() ([]ModelConfig, error) {
 			updatedAT string
 		)
 		if err := rows.Scan(&m.ID, &m.Name, &m.Provider, &m.BaseURL, &m.APIKey, &m.Model,
-			&m.Persona, &m.Temperature, &m.MaxTokens, &m.TimeoutMS, &enabled, &updatedAT); err != nil {
+			&m.Persona, &m.FallbackReplies, &m.Temperature, &m.MaxTokens, &m.TimeoutMS, &enabled, &updatedAT); err != nil {
 			return nil, err
 		}
 		m.Enabled = enabled != 0
@@ -125,11 +128,11 @@ func (s *Store) GetModel(id int64) (*ModelConfig, error) {
 		enabled   int
 		updatedAT string
 	)
-	err := s.db.QueryRow(`SELECT id, name, provider, base_url, api_key, model, persona,
+	err := s.db.QueryRow(`SELECT id, name, provider, base_url, api_key, model, persona, fallback_replies,
 		temperature, max_tokens, timeout_ms, enabled, updated_at
 		FROM model_configs WHERE id = ?`, id).
 		Scan(&m.ID, &m.Name, &m.Provider, &m.BaseURL, &m.APIKey, &m.Model,
-			&m.Persona, &m.Temperature, &m.MaxTokens, &m.TimeoutMS, &enabled, &updatedAT)
+			&m.Persona, &m.FallbackReplies, &m.Temperature, &m.MaxTokens, &m.TimeoutMS, &enabled, &updatedAT)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -150,11 +153,11 @@ func (s *Store) ActiveModel() (*ModelConfig, bool, error) {
 		enabled   int
 		updatedAT string
 	)
-	err := s.db.QueryRow(`SELECT id, name, provider, base_url, api_key, model, persona,
+	err := s.db.QueryRow(`SELECT id, name, provider, base_url, api_key, model, persona, fallback_replies,
 		temperature, max_tokens, timeout_ms, enabled, updated_at
 		FROM model_configs WHERE enabled = 1 ORDER BY id LIMIT 1`).
 		Scan(&m.ID, &m.Name, &m.Provider, &m.BaseURL, &m.APIKey, &m.Model,
-			&m.Persona, &m.Temperature, &m.MaxTokens, &m.TimeoutMS, &enabled, &updatedAT)
+			&m.Persona, &m.FallbackReplies, &m.Temperature, &m.MaxTokens, &m.TimeoutMS, &enabled, &updatedAT)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -180,9 +183,9 @@ func (s *Store) SaveModel(m *ModelConfig) error {
 
 	if m.ID == 0 {
 		res, err := s.db.Exec(`INSERT INTO model_configs
-			(name, provider, base_url, api_key, model, persona, temperature, max_tokens, timeout_ms, enabled, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			m.Name, m.Provider, m.BaseURL, m.APIKey, m.Model, m.Persona,
+			(name, provider, base_url, api_key, model, persona, fallback_replies, temperature, max_tokens, timeout_ms, enabled, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			m.Name, m.Provider, m.BaseURL, m.APIKey, m.Model, m.Persona, m.FallbackReplies,
 			m.Temperature, m.MaxTokens, m.TimeoutMS, boolInt(m.Enabled), updatedAT)
 		if err != nil {
 			return err
@@ -199,10 +202,10 @@ func (s *Store) SaveModel(m *ModelConfig) error {
 	}
 
 	if _, err := s.db.Exec(`UPDATE model_configs SET
-		name = ?, provider = ?, base_url = ?, api_key = ?, model = ?, persona = ?,
+		name = ?, provider = ?, base_url = ?, api_key = ?, model = ?, persona = ?, fallback_replies = ?,
 		temperature = ?, max_tokens = ?, timeout_ms = ?, updated_at = ?
 		WHERE id = ?`,
-		m.Name, m.Provider, m.BaseURL, m.APIKey, m.Model, m.Persona,
+		m.Name, m.Provider, m.BaseURL, m.APIKey, m.Model, m.Persona, m.FallbackReplies,
 		m.Temperature, m.MaxTokens, m.TimeoutMS, updatedAT, m.ID); err != nil {
 		return err
 	}

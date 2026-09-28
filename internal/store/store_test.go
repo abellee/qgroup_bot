@@ -220,3 +220,57 @@ func TestStoreReopens(t *testing.T) {
 		t.Errorf("CountAdmins after reopen = %d, want 1", n)
 	}
 }
+
+// The fallback list rides with the row through save and load, and a database
+// made by an older build gains the column on open instead of breaking.
+func TestFallbackRepliesRoundTripAndMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	row := openRow("主用", ProviderOpenAI)
+	row.FallbackReplies = "第一条\n第二条\n"
+	if err := st.SaveModel(row); err != nil {
+		t.Fatalf("SaveModel: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Roll the schema back to what an older build left behind.
+	aged, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen for aging: %v", err)
+	}
+	if _, err := aged.db.Exec(`ALTER TABLE model_configs DROP COLUMN fallback_replies`); err != nil {
+		t.Fatalf("drop column: %v", err)
+	}
+	if _, err := aged.db.Exec(`INSERT INTO settings (key, value) VALUES ('keep', 'alive')`); err != nil {
+		t.Fatalf("keep the file busy: %v", err)
+	}
+	aged.Close()
+
+	fresh, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after drop: %v", err)
+	}
+	defer fresh.Close()
+
+	got, err := fresh.GetModel(row.ID)
+	if err != nil {
+		t.Fatalf("GetModel: %v", err)
+	}
+	if got.FallbackReplies != "" {
+		t.Errorf("FallbackReplies after migration = %q, want the column's empty default", got.FallbackReplies)
+	}
+
+	got.FallbackReplies = "第一条\n第二条"
+	if err := fresh.SaveModel(got); err != nil {
+		t.Fatalf("SaveModel after migration: %v", err)
+	}
+	if again, err := fresh.GetModel(row.ID); err != nil || again.FallbackReplies != "第一条\n第二条" {
+		t.Errorf("FallbackReplies = %q, %v, want the saved lines", again.FallbackReplies, err)
+	}
+}
