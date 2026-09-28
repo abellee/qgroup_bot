@@ -170,8 +170,8 @@ function time(text) {
     v-if="sheetOpen"
     :row="editing"
     :providers="providers"
+    :save="save"
     @close="sheetOpen = false"
-    @save="save"
   />
 
   <div v-if="notice" class="toast">{{ notice }}</div>

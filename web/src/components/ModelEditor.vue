@@ -6,8 +6,11 @@ const props = defineProps({
   // API key the panel can only ever show masked.
   row: { type: Object, default: null },
   providers: { type: Array, default: () => [] },
+  // The save call as a function, not an event: emit cannot carry a promise
+  // back, and the button has to stay held until the panel has answered.
+  save: { type: Function, required: true },
 })
-const emit = defineEmits(['close', 'save'])
+const emit = defineEmits(['close'])
 
 const form = reactive({
   id: props.row ? props.row.id : 0,
@@ -40,8 +43,11 @@ async function submit() {
   busy.value = true
   // A false return leaves the sheet open with the message shown, so nothing the
   // operator typed is lost.
-  await emit('save', { ...form })
-  busy.value = false
+  try {
+    await props.save({ ...form })
+  } finally {
+    busy.value = false
+  }
 }
 
 function onKeydown(e) {
