@@ -173,14 +173,16 @@ func (s *Store) SaveModel(m *ModelConfig) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC()
+	m.UpdatedAt = now
+	updatedAT := now.Format(time.RFC3339)
 
 	if m.ID == 0 {
 		res, err := s.db.Exec(`INSERT INTO model_configs
 			(name, provider, base_url, api_key, model, persona, temperature, max_tokens, timeout_ms, enabled, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			m.Name, m.Provider, m.BaseURL, m.APIKey, m.Model, m.Persona,
-			m.Temperature, m.MaxTokens, m.TimeoutMS, boolInt(m.Enabled), now)
+			m.Temperature, m.MaxTokens, m.TimeoutMS, boolInt(m.Enabled), updatedAT)
 		if err != nil {
 			return err
 		}
@@ -200,7 +202,7 @@ func (s *Store) SaveModel(m *ModelConfig) error {
 		temperature = ?, max_tokens = ?, timeout_ms = ?, updated_at = ?
 		WHERE id = ?`,
 		m.Name, m.Provider, m.BaseURL, m.APIKey, m.Model, m.Persona,
-		m.Temperature, m.MaxTokens, m.TimeoutMS, now, m.ID); err != nil {
+		m.Temperature, m.MaxTokens, m.TimeoutMS, updatedAT, m.ID); err != nil {
 		return err
 	}
 	if m.Enabled {
