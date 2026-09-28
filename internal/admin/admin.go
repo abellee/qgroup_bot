@@ -6,6 +6,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -48,6 +49,13 @@ const (
 	loginLockout    = 10 * time.Minute
 )
 
+// Tester is the one call behind the panel's test dialog: a single turn with one
+// stored row's configuration, the same call a group @ triggers. main wires it
+// to the llm client; the panel never sees a provider's request shape.
+type Tester interface {
+	TestModel(ctx context.Context, cfg store.ModelConfig, prompt string) (string, error)
+}
+
 // Server holds the sessions in process memory: a restart asks the operator to
 // log in again, which is the right trade against a session table that outlives a
 // password change.
@@ -56,6 +64,7 @@ type Server struct {
 	log      *slog.Logger
 	dist     fs.FS
 	path     string
+	tester   Tester
 	mu       sync.Mutex
 	sess     map[string]*session
 	throttle map[string]*failedLogins
@@ -73,7 +82,7 @@ type failedLogins struct {
 	until time.Time
 }
 
-func New(st *store.Store, log *slog.Logger) (*Server, error) {
+func New(st *store.Store, log *slog.Logger, tester Tester) (*Server, error) {
 	dist, err := web.Dist()
 	if err != nil {
 		return nil, err
@@ -83,6 +92,7 @@ func New(st *store.Store, log *slog.Logger) (*Server, error) {
 		log:      log,
 		dist:     dist,
 		path:     panelPathOf(st, log),
+		tester:   tester,
 		sess:     map[string]*session{},
 		throttle: map[string]*failedLogins{},
 	}, nil
@@ -135,6 +145,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(s.path+"/api/models", s.authed(s.handleModels))
 	mux.HandleFunc(s.path+"/api/models/enable", s.authed(s.handleEnable))
 	mux.HandleFunc(s.path+"/api/models/delete", s.authed(s.handleDelete))
+	mux.HandleFunc(s.path+"/api/models/test", s.authed(s.handleModelTest))
 	mux.HandleFunc(s.path+"/api/providers", s.authed(s.handleProviders))
 
 	// Everything else is the bundle: the app itself and its hashed assets.

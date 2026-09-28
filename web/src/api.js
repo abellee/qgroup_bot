@@ -51,4 +51,5 @@ export const api = {
   saveModel: (model) => request('/models', { method: 'POST', body: model }),
   enableModel: (id) => request('/models/enable', { method: 'POST', body: { id } }),
   deleteModel: (id) => request('/models/delete', { method: 'POST', body: { id } }),
+  testModel: (id, prompt) => request('/models/test', { method: 'POST', body: { id, prompt } }),
 }

@@ -278,6 +278,71 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": providerLabels})
 }
 
+// testRequest is the body of the test dialog: one stored row and one prompt,
+// the same single turn a group @ would send.
+type testRequest struct {
+	ID     int64  `json:"id"`
+	Prompt string `json:"prompt"`
+}
+
+// handleModelTest runs one prompt against one row - enabled or not - so a
+// credential or a persona can be checked before anything goes to a group.
+func (s *Server) handleModelTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "只接受 POST")
+		return
+	}
+	if s.tester == nil {
+		writeError(w, http.StatusServiceUnavailable, "测试通道未接入")
+		return
+	}
+	var in testRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.ID <= 0 {
+		writeError(w, http.StatusBadRequest, "缺少 id")
+		return
+	}
+	prompt := strings.TrimSpace(in.Prompt)
+	if prompt == "" {
+		writeError(w, http.StatusBadRequest, "先输入要发给模型的话")
+		return
+	}
+	cfg, err := s.st.GetModel(in.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "这条配置已经不存在了")
+		return
+	}
+	if err != nil {
+		s.log.Error("model lookup failed", "id", in.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "读取失败")
+		return
+	}
+
+	// A model answer can outlast the server's write deadline, and the row's own
+	// timeout is the real bound, so the deadline moves out to match.
+	horizon := time.Duration(cfg.TimeoutMS)*time.Millisecond + 5*time.Second
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(horizon)); err != nil {
+		s.log.Warn("write deadline not extendable", "error", err)
+	}
+
+	start := time.Now()
+	answer, err := s.tester.TestModel(r.Context(), *cfg, prompt)
+	if err != nil {
+		s.log.Warn("model test failed", "id", cfg.ID, "name", cfg.Name, "provider", cfg.Provider,
+			"error", err, "took", time.Since(start).String())
+		writeError(w, http.StatusBadGateway, "模型调用失败："+err.Error())
+		return
+	}
+	s.log.Info("model test", "id", cfg.ID, "name", cfg.Name, "provider", cfg.Provider,
+		"took", time.Since(start).String())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"answer":  answer,
+		"took_ms": time.Since(start).Milliseconds(),
+	})
+}
+
 func activeID(m *store.ModelConfig) int64 {
 	if m == nil {
 		return 0

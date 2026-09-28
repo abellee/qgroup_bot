@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api'
 import ModelEditor from '@/components/ModelEditor.vue'
+import ModelTester from '@/components/ModelTester.vue'
 
 const emit = defineEmits(['signed-out'])
 
@@ -11,6 +12,7 @@ const loading = ref(true)
 const error = ref('')
 const notice = ref('')
 const editing = ref(null)
+const testing = ref(null)
 const sheetOpen = ref(false)
 
 const active = computed(() => rows.value.find((m) => m.enabled) || null)
@@ -60,6 +62,9 @@ function openEdit(row) {
   editing.value = row
   sheetOpen.value = true
 }
+function openTest(row) {
+  testing.value = row
+}
 
 async function save(payload) {
   try {
@@ -90,6 +95,7 @@ async function remove(row) {
   try {
     await api.deleteModel(row.id)
     if (editing.value && editing.value.id === row.id) sheetOpen.value = false
+    if (testing.value && testing.value.id === row.id) testing.value = null
     await load()
     say('已删除')
   } catch (e) {
@@ -158,6 +164,7 @@ function time(text) {
         </div>
 
         <div class="row-ops">
+          <button class="plain small" @click="openTest(row)">测试</button>
           <button v-if="!row.enabled" class="small" @click="enable(row)">启用</button>
           <button class="plain small" @click="openEdit(row)">编辑</button>
           <button class="danger small" @click="remove(row)">删除</button>
@@ -172,6 +179,12 @@ function time(text) {
     :providers="providers"
     :save="save"
     @close="sheetOpen = false"
+  />
+
+  <ModelTester
+    v-if="testing"
+    :row="testing"
+    @close="testing = null"
   />
 
   <div v-if="notice" class="toast">{{ notice }}</div>

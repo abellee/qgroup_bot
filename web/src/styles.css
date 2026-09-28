@@ -223,6 +223,17 @@ textarea { min-height: 108px; resize: vertical; }
 .sheet-foot { display: flex; gap: 10px; margin-top: 6px; }
 .sheet-foot button { flex: 1; }
 
+/* ---------- model test ---------- */
+.answer {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.answer-meta { color: var(--faint); font-size: 12.5px; margin-bottom: 4px; }
+.answer-body { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+
 .skeleton { padding: 20px; color: var(--faint); }
 
 @media (max-width: 720px) {

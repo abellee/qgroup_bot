@@ -46,6 +46,21 @@ func NewModelReply(models ModelSource, completer Completer, qq Sender, log *slog
 	return &ModelReply{models: models, llm: completer, qq: qq, log: log}
 }
 
+// ConfigOf maps one stored row onto the llm call. The group reply path and the
+// panel's test dialog both go through it, so the two never drift apart.
+func ConfigOf(cfg *store.ModelConfig) llm.Config {
+	return llm.Config{
+		Provider:    cfg.Provider,
+		BaseURL:     cfg.BaseURL,
+		APIKey:      cfg.APIKey,
+		Model:       cfg.Model,
+		Persona:     cfg.Persona,
+		Temperature: cfg.Temperature,
+		MaxTokens:   cfg.MaxTokens,
+		Timeout:     time.Duration(cfg.TimeoutMS) * time.Millisecond,
+	}
+}
+
 func (r *ModelReply) HandleGroupMessage(ctx context.Context, ev *qqbot.GroupMessageEvent) {
 	// Only a message that addressed the bot is a question for it. The
 	// full-traffic event carries everything the group says.
@@ -75,16 +90,7 @@ func (r *ModelReply) HandleGroupMessage(ctx context.Context, ev *qqbot.GroupMess
 	logFields = append(logFields, "model", cfg.Name, "provider", cfg.Provider)
 
 	start := time.Now()
-	answer, err := r.llm.Complete(ctx, llm.Config{
-		Provider:    cfg.Provider,
-		BaseURL:     cfg.BaseURL,
-		APIKey:      cfg.APIKey,
-		Model:       cfg.Model,
-		Persona:     cfg.Persona,
-		Temperature: cfg.Temperature,
-		MaxTokens:   cfg.MaxTokens,
-		Timeout:     time.Duration(cfg.TimeoutMS) * time.Millisecond,
-	}, prompt)
+	answer, err := r.llm.Complete(ctx, ConfigOf(cfg), prompt)
 	if err != nil {
 		r.log.Error("model call failed", append(logFields, "error", err, "took", time.Since(start).String())...)
 		return

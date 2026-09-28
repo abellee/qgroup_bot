@@ -41,7 +41,7 @@ func run() error {
 	// A model answer can take tens of seconds, so the client for it is not the
 	// 8-second one used for sub2api. The real bound is the per-configuration
 	// timeout, applied as a context deadline inside the call.
-	httpModels := &http.Client{Timeout: 5 * time.Minute}
+	completer := llm.New(&http.Client{Timeout: 5 * time.Minute})
 
 	qq := qqbot.NewClient(cfg.QQAPIBase, cfg.AppID, cfg.AppSecret, httpUpstream)
 	dir := sub2api.New(cfg.Sub2APIBase, cfg.Sub2APIAdminKey, cfg.Sub2APIUserRoute, httpUpstream)
@@ -69,9 +69,9 @@ func run() error {
 	var panel http.Handler
 	var panelPath string
 	if st != nil {
-		handlers = append(handlers, chat.NewModelReply(st, llm.New(httpModels), qq, log).HandleGroupMessage)
+		handlers = append(handlers, chat.NewModelReply(st, completer, qq, log).HandleGroupMessage)
 
-		server, err := admin.New(st, log)
+		server, err := admin.New(st, log, panelTester{client: completer})
 		if err != nil {
 			return fmt.Errorf("build admin panel: %w", err)
 		}
@@ -130,6 +130,14 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// panelTester adapts the shared llm client to the panel's test dialog: one
+// stored row plus one prompt, exactly what a group @ turns into.
+type panelTester struct{ client *llm.Client }
+
+func (p panelTester) TestModel(ctx context.Context, cfg store.ModelConfig, prompt string) (string, error) {
+	return p.client.Complete(ctx, chat.ConfigOf(&cfg), prompt)
 }
 
 // ensureAdmin stores the first administrator from the env. It runs once: after

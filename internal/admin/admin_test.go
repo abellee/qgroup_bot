@@ -2,7 +2,9 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,6 +25,23 @@ const (
 	testPass = "a-correct-horse"
 )
 
+// stubTester stands in for the llm client: it records the row and prompt the
+// panel handed it and answers with a fixed string, or fails on demand.
+type stubTester struct {
+	answer string
+	err    error
+	calls  int
+	cfg    store.ModelConfig
+	prompt string
+}
+
+func (s *stubTester) TestModel(_ context.Context, cfg store.ModelConfig, prompt string) (string, error) {
+	s.calls++
+	s.cfg = cfg
+	s.prompt = prompt
+	return s.answer, s.err
+}
+
 func newTestServer(t *testing.T) (*store.Store, *Server) {
 	t.Helper()
 
@@ -40,7 +59,7 @@ func newTestServer(t *testing.T) (*store.Store, *Server) {
 		t.Fatalf("create admin: %v", err)
 	}
 
-	srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), &stubTester{answer: "测试回答"})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -163,7 +182,7 @@ func TestPanelPathIsDrawnOnceAndSticks(t *testing.T) {
 
 	mk := func() *Server {
 		t.Helper()
-		srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		srv, err := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), &stubTester{answer: "ok"})
 		if err != nil {
 			t.Fatalf("new server: %v", err)
 		}
@@ -244,6 +263,7 @@ func TestEveryDataRouteRefusesAnAnonymousCaller(t *testing.T) {
 		{http.MethodPost, "/admin/api/models", map[string]any{"provider": "openai"}},
 		{http.MethodPost, "/admin/api/models/enable", map[string]any{"id": 1}},
 		{http.MethodPost, "/admin/api/models/delete", map[string]any{"id": 1}},
+		{http.MethodPost, "/admin/api/models/test", map[string]any{"id": 1, "prompt": "x"}},
 		{http.MethodPost, "/admin/api/logout", map[string]any{}},
 	}
 	for _, tc := range cases {
@@ -520,6 +540,69 @@ func countEnabled(t *testing.T, c *client) int {
 	return n
 }
 
+func TestModelTestReplaysTheRowBeforeItIsEnabled(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+	tester := srv.tester.(*stubTester)
+
+	rec := c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": 0, "name": "未启用", "provider": "anthropic", "base_url": "https://api.anthropic.com",
+		"api_key": "sk-ant-1234567890", "model": "claude-test", "persona": "回答要短", "enabled": false,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create got %d: %s", rec.Code, rec.Body)
+	}
+	id := int64(jsonOf(t, rec)["id"].(float64))
+
+	// The dialog works on a disabled row: testing before enabling is the point.
+	rec = c.do(http.MethodPost, "/admin/api/models/test", map[string]any{"id": id, "prompt": " 你好 "})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test got %d: %s", rec.Code, rec.Body)
+	}
+	body := jsonOf(t, rec)
+	if body["answer"] != tester.answer {
+		t.Errorf("answer = %v, want the stub's reply", body["answer"])
+	}
+	if _, ok := body["took_ms"].(float64); !ok {
+		t.Errorf("took_ms = %v, want a duration", body["took_ms"])
+	}
+	if tester.prompt != "你好" {
+		t.Errorf("prompt = %q, want the trimmed text", tester.prompt)
+	}
+	if tester.cfg.ID != id || tester.cfg.Model != "claude-test" || tester.cfg.APIKey != "sk-ant-1234567890" {
+		t.Errorf("row handed to the tester = %+v, want the stored one", tester.cfg)
+	}
+
+	// The call is bound to the row: a missing id is a 404, a blank prompt and a
+	// zero id are refused before the tester runs at all.
+	tester.calls = 0
+	for name, req := range map[string]struct {
+		body map[string]any
+		want int
+	}{
+		"missing row": {map[string]any{"id": 9999, "prompt": "hi"}, http.StatusNotFound},
+		"no id":       {map[string]any{"prompt": "hi"}, http.StatusBadRequest},
+		"no prompt":   {map[string]any{"id": id, "prompt": "   "}, http.StatusBadRequest},
+	} {
+		if rec = c.do(http.MethodPost, "/admin/api/models/test", req.body); rec.Code != req.want {
+			t.Errorf("%s got %d, want %d", name, rec.Code, req.want)
+		}
+	}
+	if tester.calls != 0 {
+		t.Errorf("the tester ran %d times for refused requests", tester.calls)
+	}
+
+	// A provider failure surfaces as 502 with the provider's own complaint.
+	tester.err = errors.New("http 401: bad key")
+	if rec = c.do(http.MethodPost, "/admin/api/models/test", map[string]any{"id": id, "prompt": "hi"}); rec.Code != http.StatusBadGateway {
+		t.Errorf("failing test got %d, want 502", rec.Code)
+	}
+	if !strings.Contains(errText(t, rec), "bad key") {
+		t.Errorf("error = %s, want the provider's complaint", rec.Body)
+	}
+}
+
 func TestIncompleteRowIsRefusedByName(t *testing.T) {
 	st, srv := newTestServer(t)
 	c := newClient(t, srv)
@@ -588,7 +671,7 @@ func TestReadOnlyRoutesRefuseOtherMethods(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET the login endpoint got %d, want 405", rec.Code)
 	}
-	for _, target := range []string{"/admin/api/models", "/admin/api/providers", "/admin/api/session"} {
+	for _, target := range []string{"/admin/api/models", "/admin/api/models/test", "/admin/api/providers", "/admin/api/session"} {
 		rec := c.do(http.MethodDelete, target, nil)
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s got %d, want 405", http.MethodDelete, target, rec.Code)
