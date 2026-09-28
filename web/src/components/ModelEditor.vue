@@ -29,6 +29,34 @@ const form = reactive({
 const busy = ref(false)
 const keyGiven = computed(() => !!(props.row && props.row.key_given))
 
+// The model catalog the fetch button pulls: the request carries the form's own
+// provider and base url, and a blank key means the server asks the provider
+// with the stored one, exactly the semantics a save applies.
+const remoteLoading = ref(false)
+const remoteModels = ref([])
+const remoteError = ref('')
+
+async function pullModels() {
+  if (remoteLoading.value) return
+  remoteLoading.value = true
+  remoteError.value = ''
+  remoteModels.value = []
+  try {
+    const out = await api.remoteModels({
+      id: form.id,
+      provider: form.provider,
+      base_url: form.base_url,
+      api_key: form.api_key,
+    })
+    remoteModels.value = out.models || []
+    if (!remoteModels.value.length) remoteError.value = '上游没有返回任何模型'
+  } catch (e) {
+    remoteError.value = e.message || '拉取失败'
+  } finally {
+    remoteLoading.value = false
+  }
+}
+
 // What the request path will look like for the chosen provider, so a wrong base
 // url is visible before it silently fails in the group.
 const protocolHint = computed(() => {
@@ -92,7 +120,15 @@ function onKeydown(e) {
 
         <label>
           <span>模型</span>
-          <input v-model="form.model" type="text" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-flash">
+          <div class="with-btn">
+            <input v-model="form.model" type="text" list="remote-model-options" placeholder="gpt-4o-mini / claude-sonnet-4-5 / gemini-2.5-flash">
+            <button type="button" class="plain" :disabled="remoteLoading" @click="pullModels">{{ remoteLoading ? '拉取中…' : '获取列表' }}</button>
+          </div>
+          <datalist id="remote-model-options">
+            <option v-for="m in remoteModels" :key="m" :value="m"></option>
+          </datalist>
+          <span v-if="remoteModels.length" class="hint">上游返回 {{ remoteModels.length }} 个模型，点击输入框即可选择</span>
+          <span v-if="remoteError" class="hint err">{{ remoteError }}</span>
         </label>
 
         <label>

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -178,6 +179,99 @@ func (c *Client) responses(ctx context.Context, cfg Config, prompt string) (stri
 	return strings.TrimSpace(sb.String()), nil
 }
 
+// ListModels pulls the model ids a provider offers, so the panel's model field
+// can offer real choices instead of a guess. Each protocol reads its own list
+// endpoint; the ids come back sorted, and gemini entries that cannot generate
+// content (embeddings, imagen) are left out.
+func (c *Client) ListModels(ctx context.Context, cfg Config) ([]string, error) {
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return nil, fmt.Errorf("no api base url configured")
+	}
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		return nil, fmt.Errorf("no api key configured")
+	}
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
+
+	var ids []string
+	switch strings.ToLower(cfg.Provider) {
+	case "openai", "openai-responses":
+		var out struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		url := joinBase(cfg.BaseURL, "/v1") + "/models"
+		if err := c.get(ctx, url, map[string]string{"Authorization": "Bearer " + cfg.APIKey}, &out); err != nil {
+			return nil, err
+		}
+		for _, m := range out.Data {
+			if m.ID != "" {
+				ids = append(ids, m.ID)
+			}
+		}
+	case "anthropic":
+		var out struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		// The default page holds 20 rows; ask for the most the api allows.
+		url := joinBase(cfg.BaseURL, "/v1") + "/models?limit=1000"
+		if err := c.get(ctx, url, map[string]string{
+			"x-api-key":         cfg.APIKey,
+			"anthropic-version": anthropicVersion,
+		}, &out); err != nil {
+			return nil, err
+		}
+		for _, m := range out.Data {
+			if m.ID != "" {
+				ids = append(ids, m.ID)
+			}
+		}
+	case "gemini":
+		var out struct {
+			Models []struct {
+				Name      string   `json:"name"`
+				Supported []string `json:"supportedGenerationMethods"`
+			} `json:"models"`
+		}
+		url := joinBase(cfg.BaseURL, "/v1beta") + "/models"
+		if err := c.get(ctx, url, map[string]string{"x-goog-api-key": cfg.APIKey}, &out); err != nil {
+			return nil, err
+		}
+		for _, m := range out.Models {
+			if !generates(m.Supported) {
+				continue
+			}
+			if name := strings.TrimPrefix(m.Name, "models/"); name != "" {
+				ids = append(ids, name)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported provider %q", cfg.Provider)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// generates reports whether a gemini model can answer a generateContent call.
+// An absent method list is read as "unspecified", which some relays return.
+func generates(methods []string) bool {
+	if len(methods) == 0 {
+		return true
+	}
+	for _, m := range methods {
+		if m == "generateContent" {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) anthropic(ctx context.Context, cfg Config, prompt string) (string, error) {
 	body := map[string]any{
 		"model":       cfg.Model,
@@ -289,10 +383,26 @@ func (c *Client) post(ctx context.Context, url string, headers map[string]string
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	return c.send(req, out)
+}
 
+// get reads one url and decodes a JSON answer, with the same status handling
+// post applies.
+func (c *Client) get(ctx context.Context, url string, headers map[string]string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	return c.send(req, out)
+}
+
+func (c *Client) send(req *http.Request, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("request to %s failed: %w", url, err)
+		return fmt.Errorf("request to %s failed: %w", req.URL, err)
 	}
 	defer resp.Body.Close()
 
@@ -301,7 +411,7 @@ func (c *Client) post(ctx context.Context, url string, headers map[string]string
 		return fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s: http %d %s", url, resp.StatusCode, snippet(raw))
+		return fmt.Errorf("%s: http %d %s", req.URL, resp.StatusCode, snippet(raw))
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("decode response: %w (%s)", err, snippet(raw))

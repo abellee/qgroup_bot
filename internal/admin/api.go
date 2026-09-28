@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -276,6 +277,78 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": providerLabels})
+}
+
+// remoteRequest is the body of the model catalog call: the form's provider and
+// base url, plus whatever key the form holds. A blank key on an existing row
+// means "keep the stored one", and the stored key is what the provider should
+// be asked with - the form never sees it.
+type remoteRequest struct {
+	ID       int64  `json:"id"`
+	Provider string `json:"provider"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"`
+}
+
+// handleModelRemote proxies the provider's own model list back to the app, so
+// the model field can offer real choices. It never logs the key.
+func (s *Server) handleModelRemote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "只接受 POST")
+		return
+	}
+	if s.tester == nil {
+		writeError(w, http.StatusServiceUnavailable, "模型列表通道未接入")
+		return
+	}
+	var in remoteRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(in.Provider))
+	if !store.ValidProvider(provider) {
+		writeError(w, http.StatusBadRequest, "提供商不对，先在表单里选一个")
+		return
+	}
+	baseURL := strings.TrimSpace(in.BaseURL)
+	if baseURL == "" {
+		writeError(w, http.StatusBadRequest, "先填 API 地址")
+		return
+	}
+	apiKey := strings.TrimSpace(in.APIKey)
+	if apiKey == "" && in.ID > 0 {
+		if stored, err := s.st.GetModel(in.ID); err == nil {
+			apiKey = stored.APIKey
+		}
+	}
+	if apiKey == "" {
+		writeError(w, http.StatusBadRequest, "先填 API Key")
+		return
+	}
+
+	// A slow relay should not eat the whole server write deadline; the list
+	// call is small, so its budget is fixed and short.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		s.log.Warn("write deadline not extendable", "error", err)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	ids, err := s.tester.ListModels(ctx, store.ModelConfig{
+		Provider: provider,
+		BaseURL:  baseURL,
+		APIKey:   apiKey,
+	})
+	if err != nil {
+		s.log.Warn("model list pull failed", "provider", provider, "base_url", baseURL, "error", err)
+		writeError(w, http.StatusBadGateway, "拉取模型列表失败："+err.Error())
+		return
+	}
+	s.log.Info("model list pulled", "provider", provider, "base_url", baseURL, "count", len(ids))
+	if ids == nil {
+		ids = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": ids})
 }
 
 // testRequest is the body of the test dialog: one stored row and one prompt,

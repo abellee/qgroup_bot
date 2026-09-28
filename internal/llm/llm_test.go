@@ -41,9 +41,12 @@ func newStub(t *testing.T, status int, response string) *providerStub {
 			time.Sleep(delay)
 		}
 		raw, _ := io.ReadAll(r.Body)
-		rec := request{path: r.URL.Path, header: r.Header.Clone()}
-		if err := json.Unmarshal(raw, &rec.body); err != nil {
-			t.Errorf("request body is not json: %v (%s)", err, raw)
+		rec := request{path: r.URL.RequestURI(), header: r.Header.Clone()}
+		// A GET carries no body; only judge the JSON of the ones that do.
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &rec.body); err != nil {
+				t.Errorf("request body is not json: %v (%s)", err, raw)
+			}
 		}
 		s.mu.Lock()
 		s.requests = append(s.requests, rec)
@@ -211,6 +214,97 @@ func TestResponsesIncompleteRunIsAnError(t *testing.T) {
 	_, err := stub.client.Complete(context.Background(), cfg, "问题")
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Errorf("err = %v, want the incomplete status named", err)
+	}
+}
+
+func TestListModelsPerProvider(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		response string
+		want     []string
+		check    func(t *testing.T, rec request)
+	}{
+		{
+			name:     "openai",
+			provider: "openai",
+			response: `{"data":[{"id":"b-model"},{"id":"a-model"},{"id":""}]}`,
+			want:     []string{"a-model", "b-model"},
+			check: func(t *testing.T, rec request) {
+				if rec.path != "/v1/models" {
+					t.Errorf("path = %q, want /v1/models", rec.path)
+				}
+				if auth := rec.header.Get("authorization"); auth != "Bearer k-openai" {
+					t.Errorf("authorization = %q, want the bearer key", auth)
+				}
+			},
+		},
+		{
+			name:     "openai responses shares the same catalog",
+			provider: "openai-responses",
+			response: `{"data":[{"id":"gpt-5"}]}`,
+			want:     []string{"gpt-5"},
+			check: func(t *testing.T, rec request) {
+				if rec.path != "/v1/models" {
+					t.Errorf("path = %q, want /v1/models", rec.path)
+				}
+			},
+		},
+		{
+			name:     "anthropic",
+			provider: "anthropic",
+			response: `{"data":[{"id":"claude-b"},{"id":"claude-a"}]}`,
+			want:     []string{"claude-a", "claude-b"},
+			check: func(t *testing.T, rec request) {
+				if key := rec.header.Get("x-api-key"); key != "k-anthropic" {
+					t.Errorf("x-api-key = %q, want the key in its own header", key)
+				}
+				if v := rec.header.Get("anthropic-version"); v != "2023-06-01" {
+					t.Errorf("anthropic-version = %q, want the dated header", v)
+				}
+				if !strings.Contains(rec.path, "limit=1000") {
+					t.Errorf("path = %q, want the largest page the api allows", rec.path)
+				}
+			},
+		},
+		{
+			name:     "gemini keeps only generative models",
+			provider: "gemini",
+			response: `{"models":[
+				{"name":"models/gem-b","supportedGenerationMethods":["generateContent"]},
+				{"name":"models/gem-embed","supportedGenerationMethods":["embedContent"]},
+				{"name":"models/gem-a","supportedGenerationMethods":["bidiGenerateContent","generateContent"]}]}`,
+			want: []string{"gem-a", "gem-b"},
+			check: func(t *testing.T, rec request) {
+				if key := rec.header.Get("x-goog-api-key"); key != "k-gemini" {
+					t.Errorf("x-goog-api-key = %q, want the key in a header", key)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStub(t, 200, tc.response)
+			cfg := Config{Provider: tc.provider, BaseURL: stub.url, APIKey: "k-" + tc.provider, Model: "m"}
+
+			got, err := stub.client.ListModels(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("ListModels: %v", err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("models = %v, want %v", got, tc.want)
+			}
+			tc.check(t, stub.last(t))
+		})
+	}
+}
+
+func TestListModelsReportsTheProviderStatus(t *testing.T) {
+	stub := newStub(t, 401, `{"error":{"message":"bad key"}}`)
+	cfg := Config{Provider: "openai", BaseURL: stub.url, APIKey: "k"}
+
+	if _, err := stub.client.ListModels(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("err = %v, want the 401 named", err)
 	}
 }
 

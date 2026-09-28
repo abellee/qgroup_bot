@@ -167,6 +167,10 @@ input:focus, select:focus, textarea:focus {
 }
 textarea { min-height: 108px; resize: vertical; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; }
+.with-btn { display: flex; gap: 8px; }
+.with-btn input { flex: 1; min-width: 0; }
+.with-btn button { flex: none; white-space: nowrap; }
+.hint.err { color: var(--warn); }
 .check { display: flex; align-items: center; gap: 9px; }
 .check input { width: auto; }
 .check span { margin: 0; }

@@ -52,4 +52,5 @@ export const api = {
   enableModel: (id) => request('/models/enable', { method: 'POST', body: { id } }),
   deleteModel: (id) => request('/models/delete', { method: 'POST', body: { id } }),
   testModel: (id, prompt) => request('/models/test', { method: 'POST', body: { id, prompt } }),
+  remoteModels: (payload) => request('/models/remote', { method: 'POST', body: payload }),
 }

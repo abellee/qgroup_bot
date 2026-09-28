@@ -132,12 +132,17 @@ func run() error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// panelTester adapts the shared llm client to the panel's test dialog: one
-// stored row plus one prompt, exactly what a group @ turns into.
+// panelTester adapts the shared llm client to the panel's dialogs: one stored
+// row plus one prompt is exactly what a group @ turns into, and the catalog
+// call is the list behind the model field's fetch button.
 type panelTester struct{ client *llm.Client }
 
 func (p panelTester) TestModel(ctx context.Context, cfg store.ModelConfig, prompt string) (string, error) {
 	return p.client.Complete(ctx, chat.ConfigOf(&cfg), prompt)
+}
+
+func (p panelTester) ListModels(ctx context.Context, cfg store.ModelConfig) ([]string, error) {
+	return p.client.ListModels(ctx, chat.ConfigOf(&cfg))
 }
 
 // ensureAdmin stores the first administrator from the env. It runs once: after

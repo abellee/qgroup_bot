@@ -49,11 +49,12 @@ const (
 	loginLockout    = 10 * time.Minute
 )
 
-// Tester is the one call behind the panel's test dialog: a single turn with one
-// stored row's configuration, the same call a group @ triggers. main wires it
-// to the llm client; the panel never sees a provider's request shape.
+// Tester is the pair of calls behind the panel's dialogs: replaying one turn
+// against a stored row, and pulling the model catalog a provider offers. main
+// wires both to the llm client; the panel never sees a provider's request shape.
 type Tester interface {
 	TestModel(ctx context.Context, cfg store.ModelConfig, prompt string) (string, error)
+	ListModels(ctx context.Context, cfg store.ModelConfig) ([]string, error)
 }
 
 // Server holds the sessions in process memory: a restart asks the operator to
@@ -145,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(s.path+"/api/models", s.authed(s.handleModels))
 	mux.HandleFunc(s.path+"/api/models/enable", s.authed(s.handleEnable))
 	mux.HandleFunc(s.path+"/api/models/delete", s.authed(s.handleDelete))
+	mux.HandleFunc(s.path+"/api/models/remote", s.authed(s.handleModelRemote))
 	mux.HandleFunc(s.path+"/api/models/test", s.authed(s.handleModelTest))
 	mux.HandleFunc(s.path+"/api/providers", s.authed(s.handleProviders))
 

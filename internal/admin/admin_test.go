@@ -30,7 +30,9 @@ const (
 type stubTester struct {
 	answer string
 	err    error
+	ids    []string
 	calls  int
+	listed int
 	cfg    store.ModelConfig
 	prompt string
 }
@@ -40,6 +42,12 @@ func (s *stubTester) TestModel(_ context.Context, cfg store.ModelConfig, prompt 
 	s.cfg = cfg
 	s.prompt = prompt
 	return s.answer, s.err
+}
+
+func (s *stubTester) ListModels(_ context.Context, cfg store.ModelConfig) ([]string, error) {
+	s.listed++
+	s.cfg = cfg
+	return s.ids, s.err
 }
 
 func newTestServer(t *testing.T) (*store.Store, *Server) {
@@ -264,6 +272,7 @@ func TestEveryDataRouteRefusesAnAnonymousCaller(t *testing.T) {
 		{http.MethodPost, "/admin/api/models/enable", map[string]any{"id": 1}},
 		{http.MethodPost, "/admin/api/models/delete", map[string]any{"id": 1}},
 		{http.MethodPost, "/admin/api/models/test", map[string]any{"id": 1, "prompt": "x"}},
+		{http.MethodPost, "/admin/api/models/remote", map[string]any{"id": 1, "provider": "openai"}},
 		{http.MethodPost, "/admin/api/logout", map[string]any{}},
 	}
 	for _, tc := range cases {
@@ -601,6 +610,81 @@ func TestModelTestReplaysTheRowBeforeItIsEnabled(t *testing.T) {
 	if !strings.Contains(errText(t, rec), "bad key") {
 		t.Errorf("error = %s, want the provider's complaint", rec.Body)
 	}
+}
+
+func TestRemoteModelListUsesTheStoredKeyWhenBlank(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+	tester := srv.tester.(*stubTester)
+	tester.ids = []string{"gpt-a", "gpt-b"}
+
+	rec := c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": 0, "name": "r", "provider": "openai", "base_url": "https://api.example.com",
+		"api_key": "sk-stored", "model": "m",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create got %d: %s", rec.Code, rec.Body)
+	}
+	id := int64(jsonOf(t, rec)["id"].(float64))
+
+	// The form's key field is blank on an edit: the provider is asked with the
+	// stored key, the one thing the browser never sees.
+	rec = c.do(http.MethodPost, "/admin/api/models/remote", map[string]any{
+		"id": id, "provider": "openai", "base_url": "https://api.example.com",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remote list got %d: %s", rec.Code, rec.Body)
+	}
+	got := jsonOf(t, rec)["models"]
+	if strings.Join(stringSliceOf(t, got), ",") != "gpt-a,gpt-b" {
+		t.Errorf("models = %v, want the stub's catalog", got)
+	}
+	if tester.cfg.APIKey != "sk-stored" {
+		t.Errorf("asked with key %q, want the stored one", tester.cfg.APIKey)
+	}
+	if tester.cfg.BaseURL != "https://api.example.com" {
+		t.Errorf("asked at %q, want the form's base url", tester.cfg.BaseURL)
+	}
+
+	// Bad requests are refused before the provider sees anything.
+	tester.listed = 0
+	for name, req := range map[string]struct {
+		body map[string]any
+		want int
+	}{
+		"no base url":    {map[string]any{"id": id, "provider": "openai"}, http.StatusBadRequest},
+		"no provider":    {map[string]any{"id": id, "base_url": "https://x"}, http.StatusBadRequest},
+		"no key at all":  {map[string]any{"provider": "openai", "base_url": "https://x"}, http.StatusBadRequest},
+		"unknown row id": {map[string]any{"id": 9999, "provider": "openai", "base_url": "https://x"}, http.StatusBadRequest},
+	} {
+		if rec = c.do(http.MethodPost, "/admin/api/models/remote", req.body); rec.Code != req.want {
+			t.Errorf("%s got %d, want %d", name, rec.Code, req.want)
+		}
+	}
+	if tester.listed != 0 {
+		t.Errorf("the provider was asked %d times for refused requests", tester.listed)
+	}
+
+	// A provider failure surfaces with its complaint.
+	tester.err = errors.New("http 401: bad key")
+	tester.ids = nil
+	if rec = c.do(http.MethodPost, "/admin/api/models/remote", map[string]any{
+		"id": id, "provider": "openai", "base_url": "https://api.example.com",
+	}); rec.Code != http.StatusBadGateway {
+		t.Errorf("failing pull got %d, want 502", rec.Code)
+	}
+}
+
+func stringSliceOf(t *testing.T, v any) []string {
+	t.Helper()
+	raw, _ := v.([]any)
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		s, _ := item.(string)
+		out = append(out, s)
+	}
+	return out
 }
 
 func TestIncompleteRowIsRefusedByName(t *testing.T) {
