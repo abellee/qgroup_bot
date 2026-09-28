@@ -51,9 +51,11 @@ func NewHandler(appID, botSecret string, maxSkew time.Duration, queueSize int, o
 	}, nil
 }
 
-// Start runs the single worker draining both queues. One worker keeps events in
-// the order the platform sent them, so a message is never answered before the
-// join request just before it has been reviewed.
+// Start runs one worker per queue. They are separate because a model-backed
+// reply can take tens of seconds, and a join request that arrived behind it
+// should still be reviewed while the answer is in flight. Within each queue the
+// order the platform sent is kept, and a message is handled one at a time so a
+// burst of mentions cannot turn into a stampede of provider calls.
 func (h *Handler) Start(ctx context.Context) {
 	go func() {
 		for {
@@ -62,6 +64,14 @@ func (h *Handler) Start(ctx context.Context) {
 				return
 			case ev := <-h.queue:
 				h.onJoin(ctx, ev)
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
 			case ev := <-h.msgQueue:
 				h.onMessage(ctx, ev)
 			}

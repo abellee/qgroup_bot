@@ -5,3 +5,5 @@ local.env
 # 本机备忘：生产 SSH 信息与 Bot AppSecret，绝不入库
 local-notes.md
 README.local.md
+# SQLite 库文件（管理员口令哈希与模型 API Key 都在里面）
+data/

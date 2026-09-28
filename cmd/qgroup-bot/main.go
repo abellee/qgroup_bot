@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -9,10 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	"qgroup-bot/internal/admin"
 	"qgroup-bot/internal/approval"
 	"qgroup-bot/internal/chat"
 	"qgroup-bot/internal/config"
+	"qgroup-bot/internal/llm"
 	"qgroup-bot/internal/qqbot"
+	"qgroup-bot/internal/store"
 	"qgroup-bot/internal/sub2api"
 )
 
@@ -34,15 +38,45 @@ func run() error {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	httpUpstream := &http.Client{Timeout: cfg.Upstream}
+	// A model answer can take tens of seconds, so the client for it is not the
+	// 8-second one used for sub2api. The real bound is the per-configuration
+	// timeout, applied as a context deadline inside the call.
+	httpModels := &http.Client{Timeout: 5 * time.Minute}
 
 	qq := qqbot.NewClient(cfg.QQAPIBase, cfg.AppID, cfg.AppSecret, httpUpstream)
 	dir := sub2api.New(cfg.Sub2APIBase, cfg.Sub2APIAdminKey, cfg.Sub2APIUserRoute, httpUpstream)
-	reply := chat.NewMarkdownReply(qq, cfg.ChatReply, log)
 	svc := approval.NewService(qq, dir, cfg.AllowedGroups, log)
 
-	// Every group message goes through the router; the model-backed reply of
-	// later is another handler here, not a change to anything below it.
-	router := chat.NewRouter(log, reply.HandleGroupMessage)
+	// SQLite holds the administrator and the model configurations. The join
+	// approval needs neither, so a database that cannot be opened - an unmounted
+	// volume, most likely - costs the admin panel and the model reply, not the
+	// moderation the bot exists for.
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		log.Error("model store unavailable, admin panel and model replies disabled",
+			"path", cfg.DBPath, "error", err)
+	}
+	if st != nil {
+		defer st.Close()
+		if err := ensureAdmin(st, cfg, log); err != nil {
+			log.Error("administrator bootstrap failed", "error", err)
+		}
+	}
+
+	// Every group message goes through the router. With no store there is nothing
+	// to read a configuration from, so the router simply has no listeners.
+	var handlers []chat.Handler
+	var panel http.Handler
+	if st != nil {
+		handlers = append(handlers, chat.NewModelReply(st, llm.New(httpModels), qq, log).HandleGroupMessage)
+
+		server, err := admin.New(st, log)
+		if err != nil {
+			return fmt.Errorf("build admin panel: %w", err)
+		}
+		panel = server.Handler()
+	}
+	router := chat.NewRouter(log, handlers...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -57,6 +91,10 @@ func run() error {
 	// is expected to terminate in front of this listener.
 	mux := http.NewServeMux()
 	mux.Handle("/qq/callback", handler)
+	if panel != nil {
+		mux.Handle("/admin", panel)
+		mux.Handle("/admin/", panel)
+	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -86,4 +124,30 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// ensureAdmin stores the first administrator from the env. It runs once: after
+// that the hash in the database is the only thing that lets anyone in, so
+// editing the env does not hand out a second account.
+func ensureAdmin(st *store.Store, cfg *config.Config, log *slog.Logger) error {
+	count, err := st.CountAdmins()
+	if err != nil {
+		return fmt.Errorf("count administrators: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if cfg.AdminUser == "" || cfg.AdminPassword == "" {
+		log.Warn("admin panel has no account yet: set QGB_ADMIN_USER and QGB_ADMIN_PASSWORD to create one")
+		return nil
+	}
+	hash, err := admin.HashPassword(cfg.AdminPassword)
+	if err != nil {
+		return fmt.Errorf("hash administrator password: %w", err)
+	}
+	if _, err := st.CreateAdmin(cfg.AdminUser, hash); err != nil {
+		return fmt.Errorf("create administrator: %w", err)
+	}
+	log.Info("administrator account created", "username", cfg.AdminUser)
+	return nil
 }

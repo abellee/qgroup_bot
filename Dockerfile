@@ -2,8 +2,9 @@ FROM golang:1.27-alpine AS build
 
 WORKDIR /src
 
-# No third-party dependencies, so this layer only needs go.mod to warm the cache.
-COPY go.mod ./
+# The module cache is warmed before the sources land, so an edited file does not
+# re-download the SQLite driver.
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .

@@ -25,10 +25,16 @@ type Config struct {
 
 	AllowedGroups map[string]struct{}
 
-	// ChatReply is the markdown the bot answers an addressed message with;
-	// empty means the bot stays quiet in the group.
-	ChatReply string
-	Upstream  time.Duration
+	// DBPath is the SQLite file behind the admin panel: the administrator
+	// account and the model configurations.
+	DBPath string
+
+	// AdminUser and AdminPassword only matter on first start, when the database
+	// has no account yet; afterwards the stored hash is what counts.
+	AdminUser     string
+	AdminPassword string
+
+	Upstream time.Duration
 }
 
 func Load() (*Config, error) {
@@ -45,9 +51,9 @@ func Load() (*Config, error) {
 		Sub2APIAdminKey: os.Getenv("QGB_SUB2API_ADMIN_KEY"),
 		Sub2APIUserRoute: env("QGB_SUB2API_USER_ROUTE", "/api/v1/admin/users"),
 		Upstream:         envDuration("QGB_UPSTREAM_TIMEOUT", 8*time.Second),
-		// An env file cannot carry real line breaks, so the markdown copy is
-		// written with \n escapes and expanded here.
-		ChatReply:        strings.ReplaceAll(env("QGB_CHAT_REPLY_MARKDOWN", ""), `\n`, "\n"),
+		DBPath:           env("QGB_DB_PATH", "/data/qgroup.db"),
+		AdminUser:        os.Getenv("QGB_ADMIN_USER"),
+		AdminPassword:    os.Getenv("QGB_ADMIN_PASSWORD"),
 	}
 
 	if c.AppID == "" {

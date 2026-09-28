@@ -6,6 +6,11 @@ services:
     # host namespace, so it can proxy straight to 127.0.0.1:8092.
     network_mode: host
     env_file: .env
+    # The administrator account and the model configurations live here, API keys
+    # included, so the directory belongs to the container user (uid 10001) and to
+    # nobody else.
+    volumes:
+      - ./data:/data
     restart: always
     security_opt:
       - no-new-privileges:true

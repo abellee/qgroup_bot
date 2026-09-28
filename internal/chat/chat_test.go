@@ -5,10 +5,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
+	"qgroup-bot/internal/llm"
 	"qgroup-bot/internal/qqbot"
+	"qgroup-bot/internal/store"
 )
 
 type replyCall struct {
@@ -37,12 +41,45 @@ func (r *replyStub) sent() []replyCall {
 	return append([]replyCall(nil), r.calls...)
 }
 
-func msgEvent(kind, group, member, msgID string) *qqbot.GroupMessageEvent {
+// modelStub is the active-configuration lookup, and records the config it handed out.
+type modelStub struct {
+	cfg *store.ModelConfig
+	ok  bool
+	err error
+}
+
+func (m *modelStub) ActiveModel() (*store.ModelConfig, bool, error) {
+	return m.cfg, m.ok, m.err
+}
+
+type completeStub struct {
+	mu     sync.Mutex
+	prompt string
+	cfg    llm.Config
+	answer string
+	err    error
+}
+
+func (c *completeStub) Complete(_ context.Context, cfg llm.Config, prompt string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg = cfg
+	c.prompt = prompt
+	return c.answer, c.err
+}
+
+func (c *completeStub) calls() (llm.Config, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg, c.prompt
+}
+
+func msgEvent(kind, group, member, msgID, content string) *qqbot.GroupMessageEvent {
 	ev := &qqbot.GroupMessageEvent{
 		ID:          msgID,
 		GroupOpenID: group,
 		Kind:        kind,
-		Content:     "有人吗",
+		Content:     content,
 	}
 	ev.Author.MemberOpenID = member
 	return ev
@@ -52,72 +89,143 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// The bot answers only messages that address it. The full-traffic event carries
-// everything the group says, and replying to all of it would spam the group.
-func TestRepliesOnlyToAddressedMessages(t *testing.T) {
+func activeConfig() *store.ModelConfig {
+	return &store.ModelConfig{
+		Name:      "主用",
+		Provider:  store.ProviderOpenAI,
+		BaseURL:   "https://gw.example.com/v1",
+		APIKey:    "sk-test",
+		Model:     "some-model",
+		Persona:   "你是群助手",
+		MaxTokens: 512,
+		TimeoutMS: 30000,
+		Enabled:   true,
+	}
+}
+
+// The bot answers only what addresses it, once per arrival, with what the model
+// said.
+func TestModelReplyAnswersAddressedMessages(t *testing.T) {
 	replies := &replyStub{}
-	reply := NewMarkdownReply(replies, "## 收到\n\n有事请说明", discardLogger())
+	complete := &completeStub{answer: "群公告里写了怎么注册"}
+	models := &modelStub{cfg: activeConfig(), ok: true}
+	reply := NewModelReply(models, complete, replies, discardLogger())
 	ctx := context.Background()
 
-	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupMessageCreate, "g1", "m1", "msg-1"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupMessageCreate, "g1", "m1", "msg-1", "随口一句话"))
 	if got := len(replies.sent()); got != 0 {
-		t.Fatalf("replies to a plain group message = %+v, want none", got)
+		t.Fatalf("replies to a message that did not address the bot = %+v, want none", got)
+	}
+	if _, prompt := complete.calls(); prompt != "" {
+		t.Fatalf("model called for an unaddressed message with prompt %q", prompt)
 	}
 
-	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2", " 怎么注册账号 "))
 
 	sent := replies.sent()
 	if len(sent) != 1 {
-		t.Fatalf("replies = %+v, want one answer per addressed message", sent)
+		t.Fatalf("replies = %+v, want one answer", sent)
 	}
-	s := sent[0]
-	if s.Group != "g1" || s.MsgID != "msg-2" || s.Markdown != "## 收到\n\n有事请说明" {
-		t.Errorf("reply = %+v, want the addressed message answered with the configured copy", s)
+	if s := sent[0]; s.Group != "g1" || s.MsgID != "msg-2" || s.Markdown != "群公告里写了怎么注册" {
+		t.Errorf("reply = %+v, want the model's answer on the addressed message", s)
 	}
-}
-
-// Every addressed message is answered, so a second @ gets a second reply.
-func TestEachAddressedMessageIsAnswered(t *testing.T) {
-	replies := &replyStub{}
-	reply := NewMarkdownReply(replies, "在", discardLogger())
-	ctx := context.Background()
-
-	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
-	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2"))
-
-	if got := len(replies.sent()); got != 2 {
-		t.Errorf("replies = %+v, want one for each message", got)
+	cfg, prompt := complete.calls()
+	if prompt != "怎么注册账号" {
+		t.Errorf("prompt = %q, want the addressed text trimmed", prompt)
+	}
+	if cfg.Provider != store.ProviderOpenAI || cfg.Model != "some-model" ||
+		cfg.Persona != "你是群助手" || cfg.APIKey != "sk-test" || cfg.Timeout.String() != "30s" {
+		t.Errorf("llm config = %+v, want the active row carried through", cfg)
 	}
 }
 
-func TestNoCopyConfiguredMeansSilent(t *testing.T) {
+// A message with nothing in it beyond the mention is not a question.
+func TestEmptyMentionIsNotAnswered(t *testing.T) {
 	replies := &replyStub{}
-	reply := NewMarkdownReply(replies, "", discardLogger())
+	complete := &completeStub{answer: "should not be used"}
+	reply := NewModelReply(&modelStub{cfg: activeConfig(), ok: true}, complete, replies, discardLogger())
 
-	reply.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
+	reply.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "   "))
 
 	if got := len(replies.sent()); got != 0 {
-		t.Errorf("replies with no copy configured = %+v, want none", got)
+		t.Errorf("replies = %+v, want none", got)
+	}
+	if _, prompt := complete.calls(); prompt != "" {
+		t.Errorf("model called with prompt %q for an empty mention", prompt)
 	}
 }
 
-// A refused send is logged, not retried: the message event is already spent and
-// one failure per arrival is enough noise for a group.
+// Without a configuration there is nothing to ask, and the bot must not answer
+// with an invented sentence.
+func TestNoActiveModelStaysQuiet(t *testing.T) {
+	replies := &replyStub{}
+	complete := &completeStub{answer: "x"}
+	reply := NewModelReply(&modelStub{ok: false}, complete, replies, discardLogger())
+
+	reply.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "在吗"))
+
+	if got := len(replies.sent()); got != 0 {
+		t.Errorf("replies = %+v, want none without a model", got)
+	}
+}
+
+// A provider or storage failure is logged, not pasted into the group.
+func TestCallFailureSendsNothing(t *testing.T) {
+	replies := &replyStub{}
+	failing := &completeStub{err: errors.New("http 401")}
+	reply := NewModelReply(&modelStub{cfg: activeConfig(), ok: true}, failing, replies, discardLogger())
+
+	reply.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "问题"))
+
+	if got := len(replies.sent()); got != 0 {
+		t.Errorf("replies = %+v, want none after a failed call", got)
+	}
+
+	broken := NewModelReply(&modelStub{err: errors.New("database is locked")}, &completeStub{answer: "x"}, replies, discardLogger())
+	broken.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2", "问题"))
+	if got := len(replies.sent()); got != 0 {
+		t.Errorf("replies = %+v, want none when storage fails", got)
+	}
+}
+
+// An answer longer than a group message holds arrives cut down rather than
+// refused by the platform.
+func TestLongAnswerIsCutToTheGroupLimit(t *testing.T) {
+	replies := &replyStub{}
+	long := strings.Repeat("啊", maxReplyRunes+50)
+	reply := NewModelReply(&modelStub{cfg: activeConfig(), ok: true}, &completeStub{answer: long}, replies, discardLogger())
+
+	reply.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "长篇"))
+
+	sent := replies.sent()
+	if len(sent) != 1 {
+		t.Fatalf("replies = %d, want one", len(sent))
+	}
+	got := utf8.RuneCountInString(sent[0].Markdown)
+	if got != maxReplyRunes+1 {
+		t.Errorf("reply runes = %d, want %d plus the ellipsis", got, maxReplyRunes+1)
+	}
+	if !strings.HasSuffix(sent[0].Markdown, "…") {
+		t.Errorf("reply = %q, want it to end with the ellipsis", sent[0].Markdown[len(sent[0].Markdown)-8:])
+	}
+}
+
+// A refused send is logged; the answer is already spent.
 func TestSendFailureIsNotRetried(t *testing.T) {
 	replies := &replyStub{err: errors.New("http 400: 40034024")}
-	reply := NewMarkdownReply(replies, "在", discardLogger())
+	reply := NewModelReply(&modelStub{cfg: activeConfig(), ok: true}, &completeStub{answer: "答案"}, replies, discardLogger())
 	ctx := context.Background()
 
-	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
-	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "一"))
+	reply.HandleGroupMessage(ctx, msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-2", "二"))
 
 	if got := len(replies.sent()); got != 2 {
-		t.Errorf("replies = %+v, want each arrival attempted once", got)
+		t.Errorf("replies = %+v, want each arrival attempted once", replies.sent())
 	}
 }
 
-// Every handler sees the same message, which is where a model-backed reply
-// joins the router.
+// Every handler sees the same message, so a second listener can join the router
+// without changing the first.
 func TestRouterFansOutToEveryHandler(t *testing.T) {
 	var order []string
 	var mu sync.Mutex
@@ -130,7 +238,7 @@ func TestRouterFansOutToEveryHandler(t *testing.T) {
 	}
 	router := NewRouter(discardLogger(), record("first"), record("second"))
 
-	router.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1"))
+	router.HandleGroupMessage(context.Background(), msgEvent(qqbot.EventGroupAtMessageCreate, "g1", "m1", "msg-1", "hi"))
 
 	mu.Lock()
 	defer mu.Unlock()
