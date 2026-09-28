@@ -41,14 +41,14 @@ func Load() (*Config, error) {
 	c := &Config{
 		// Loopback only: TLS and the public host name terminate in the
 		// front OpenResty vhost (qbot.tokenfree.dev), which proxies here.
-		ListenAddr:      env("QGB_LISTEN_ADDR", "127.0.0.1:8092"),
-		ReadTimeout:     envDuration("QGB_READ_TIMEOUT", 10*time.Second),
-		MaxSkew:         envDuration("QGB_MAX_SKEW", 5*time.Minute),
-		AppID:           os.Getenv("QGB_QQ_APP_ID"),
-		AppSecret:       os.Getenv("QGB_QQ_APP_SECRET"),
-		QQAPIBase:       env("QGB_QQ_API_BASE", "https://api.bot.qq.com"),
-		Sub2APIBase:     os.Getenv("QGB_SUB2API_BASE"),
-		Sub2APIAdminKey: os.Getenv("QGB_SUB2API_ADMIN_KEY"),
+		ListenAddr:       env("QGB_LISTEN_ADDR", "127.0.0.1:8092"),
+		ReadTimeout:      envDuration("QGB_READ_TIMEOUT", 10*time.Second),
+		MaxSkew:          envDuration("QGB_MAX_SKEW", 5*time.Minute),
+		AppID:            os.Getenv("QGB_QQ_APP_ID"),
+		AppSecret:        os.Getenv("QGB_QQ_APP_SECRET"),
+		QQAPIBase:        env("QGB_QQ_API_BASE", "https://api.bot.qq.com"),
+		Sub2APIBase:      os.Getenv("QGB_SUB2API_BASE"),
+		Sub2APIAdminKey:  os.Getenv("QGB_SUB2API_ADMIN_KEY"),
 		Sub2APIUserRoute: env("QGB_SUB2API_USER_ROUTE", "/api/v1/admin/users"),
 		Upstream:         envDuration("QGB_UPSTREAM_TIMEOUT", 8*time.Second),
 		DBPath:           env("QGB_DB_PATH", "/data/qgroup.db"),

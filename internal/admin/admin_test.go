@@ -1,16 +1,17 @@
 package admin
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -22,7 +23,7 @@ const (
 	testPass = "a-correct-horse"
 )
 
-func newTestServer(t *testing.T) (*store.Store, http.Handler) {
+func newTestServer(t *testing.T) (*store.Store, *Server) {
 	t.Helper()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "panel.db"))
@@ -43,86 +44,104 @@ func newTestServer(t *testing.T) (*store.Store, http.Handler) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	return st, srv.Handler()
+	// The bundle inside the binary is whatever this checkout built; tests that
+	// care about the app files install their own.
+	srv.dist = fstest.MapFS{}
+	return st, srv
 }
 
-// logIn returns the session cookie plus the csrf token the page renders, the way
-// a browser would pick them up.
-func logIn(t *testing.T, h http.Handler) (string, string) {
-	t.Helper()
-
-	rec := postForm(t, h, "/admin/login", "", "", url.Values{
-		"username": {testUser},
-		"password": {testPass},
-	})
-	if rec.Code != http.StatusFound {
-		t.Fatalf("login got %d body=%s", rec.Code, rec.Body)
-	}
-	cookie := sessionCookieOf(t, rec)
-	return cookie, csrfOf(t, get(t, h, cookie, "/admin/models"))
+// client is the app's side of the contract: one cookie, one csrf token, and a
+// JSON body per mutation.
+type client struct {
+	t      *testing.T
+	srv    *Server
+	cookie string
+	csrf   string
 }
 
-func get(t *testing.T, h http.Handler, cookie, target string) string {
-	t.Helper()
-	rec := do(t, h, http.MethodGet, target, cookie, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET %s got %d body=%s", target, rec.Code, rec.Body)
-	}
-	return rec.Body.String()
-}
+func newClient(t *testing.T, srv *Server) *client { return &client{t: t, srv: srv} }
 
-func postForm(t *testing.T, h http.Handler, target, cookie, csrf string, v url.Values) *httptest.ResponseRecorder {
-	t.Helper()
-	if v == nil {
-		v = url.Values{}
-	}
-	if csrf != "" {
-		v.Set("csrf", csrf)
-	}
-	return do(t, h, http.MethodPost, target, cookie, v)
-}
+func (c *client) do(method, target string, body any) *httptest.ResponseRecorder {
+	c.t.Helper()
 
-func do(t *testing.T, h http.Handler, method, target, cookie string, form url.Values) *httptest.ResponseRecorder {
-	t.Helper()
-
-	var body io.Reader
-	if form != nil {
-		body = strings.NewReader(form.Encode())
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader([]byte(mustJSON(c.t, body)))
 	}
-	req := httptest.NewRequest(method, target, body)
-	if form != nil {
-		req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	req := httptest.NewRequest(method, target, r)
+	if body != nil {
+		req.Header.Set("content-type", "application/json")
 	}
-	if cookie != "" {
-		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	if c.csrf != "" && method != http.MethodGet {
+		req.Header.Set(csrfHeader, c.csrf)
+	}
+	if c.cookie != "" {
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: c.cookie})
 	}
 	req.RemoteAddr = "10.0.0.1:5555"
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	c.srv.Handler().ServeHTTP(rec, req)
 	return rec
 }
 
-func sessionCookieOf(t *testing.T, rec *httptest.ResponseRecorder) string {
+func mustJSON(t *testing.T, v any) string {
 	t.Helper()
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == sessionCookie && c.Value != "" {
-			return c.Value
-		}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	t.Fatalf("no %s cookie in response", sessionCookie)
-	return ""
+	return string(b)
 }
 
-var csrfPattern = regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`)
-
-func csrfOf(t *testing.T, page string) string {
+func jsonOf(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
-	m := csrfPattern.FindStringSubmatch(page)
-	if m == nil {
-		t.Fatalf("no csrf token rendered in %s", page)
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("response is not a json object (%v): %s", err, rec.Body)
 	}
-	return m[1]
+	return out
+}
+
+func errText(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	return strings.TrimSpace(jsonOf(t, rec)["error"].(string))
+}
+
+func logIn(t *testing.T, c *client) {
+	t.Helper()
+
+	rec := c.do(http.MethodPost, "/admin/api/login", map[string]string{"username": testUser, "password": testPass})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login got %d: %s", rec.Code, rec.Body)
+	}
+	body := jsonOf(t, rec)
+	if body["authenticated"] != true || body["username"] != testUser {
+		t.Fatalf("login body = %v, want an authenticated session", body)
+	}
+	csrf, _ := body["csrf"].(string)
+	if csrf == "" {
+		t.Fatal("no csrf token in the login response")
+	}
+	c.csrf = csrf
+	for _, ck := range rec.Result().Cookies() {
+		if ck.Name == sessionCookie && ck.Value != "" {
+			c.cookie = ck.Value
+		}
+	}
+	if c.cookie == "" {
+		t.Fatal("login did not hand out a session cookie")
+	}
+}
+
+func rowsOf(t *testing.T, c *client) []any {
+	t.Helper()
+	rec := c.do(http.MethodGet, "/admin/api/models", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list got %d: %s", rec.Code, rec.Body)
+	}
+	models, _ := jsonOf(t, rec)["models"].([]any)
+	return models
 }
 
 func TestHashPasswordRefusesUnusableSecrets(t *testing.T) {
@@ -158,64 +177,80 @@ func TestMaskKeyStaysUnreadable(t *testing.T) {
 	}
 }
 
-func TestEveryPanelRouteNeedsASession(t *testing.T) {
-	_, h := newTestServer(t)
+func TestEveryDataRouteRefusesAnAnonymousCaller(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
 
-	for _, target := range []string{"/admin", "/admin/", "/admin/models", "/admin/models/form", "/admin/logout"} {
-		rec := do(t, h, http.MethodGet, target, "", nil)
-		if rec.Code != http.StatusFound {
-			t.Errorf("GET %s got %d, want redirect", target, rec.Code)
-		}
-		if got := rec.Header().Get("Location"); got != "/admin/models" && got != "/admin/login" {
-			t.Errorf("GET %s redirected to %q", target, got)
+	cases := []struct {
+		method, target string
+		body           any
+	}{
+		{http.MethodGet, "/admin/api/models", nil},
+		{http.MethodGet, "/admin/api/providers", nil},
+		{http.MethodPost, "/admin/api/models", map[string]any{"provider": "openai"}},
+		{http.MethodPost, "/admin/api/models/enable", map[string]any{"id": 1}},
+		{http.MethodPost, "/admin/api/models/delete", map[string]any{"id": 1}},
+		{http.MethodPost, "/admin/api/logout", map[string]any{}},
+	}
+	for _, tc := range cases {
+		rec := c.do(tc.method, tc.target, tc.body)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s got %d, want 401 (%s)", tc.method, tc.target, rec.Code, rec.Body)
 		}
 	}
 
-	// Writes are refused before the handler ever sees the form.
-	rec := do(t, h, http.MethodPost, "/admin/models/save", "", url.Values{"csrf": {"guess"}})
-	if rec.Code != http.StatusFound {
-		t.Fatalf("POST without session got %d, want redirect to login", rec.Code)
+	// The session probe is the exception: a logged-out answer is the norm.
+	rec := c.do(http.MethodGet, "/admin/api/session", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session probe got %d: %s", rec.Code, rec.Body)
+	}
+	if jsonOf(t, rec)["authenticated"] != false {
+		t.Errorf("session probe = %s, want authenticated:false", rec.Body)
 	}
 }
 
-func TestLoginRejectsBadCredentialsAndEndsTheSession(t *testing.T) {
-	_, h := newTestServer(t)
+func TestLoginAndLogout(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
 
-	rec := postForm(t, h, "/admin/login", "", "", url.Values{"username": {testUser}, "password": {"wrong"}})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("wrong password got %d, want the form back", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "用户名或密码不正确") {
-		t.Errorf("no login error rendered: %s", rec.Body)
+	rec := c.do(http.MethodPost, "/admin/api/login", map[string]string{"username": testUser, "password": "wrong"})
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(errText(t, rec), "用户名或密码不正确") {
+		t.Fatalf("wrong password got %d: %s", rec.Code, rec.Body)
 	}
 	if rec.Header().Get("Set-Cookie") != "" {
-		t.Errorf("session handed out for a bad password: %v", rec.Header().Values("Set-Cookie"))
+		t.Error("a session was handed out for a bad password")
 	}
 
-	cookie, csrf := logIn(t, h)
-	if !strings.Contains(get(t, h, cookie, "/admin/models"), testUser) {
-		t.Error("logged-in page does not name the administrator")
+	// A password longer than bcrypt reads is refused instead of truncated.
+	rec = c.do(http.MethodPost, "/admin/api/login", map[string]string{"username": testUser, "password": strings.Repeat("x", 73)})
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("over-long password got %d, want 401", rec.Code)
 	}
 
-	rec = postForm(t, h, "/admin/logout", cookie, csrf, nil)
-	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("logout got %d -> %q", rec.Code, rec.Header().Get("Location"))
+	logIn(t, c)
+
+	rec = c.do(http.MethodGet, "/admin/api/session", nil)
+	if got := jsonOf(t, rec); got["username"] != testUser || got["csrf"] != c.csrf {
+		t.Errorf("session probe = %v, want the live session", got)
 	}
-	rec = do(t, h, http.MethodGet, "/admin/models", cookie, nil)
-	if rec.Code != http.StatusFound {
-		t.Errorf("cookie still works after logout (got %d)", rec.Code)
+
+	rec = c.do(http.MethodPost, "/admin/api/logout", map[string]any{})
+	if rec.Code != http.StatusOK || jsonOf(t, rec)["authenticated"] != false {
+		t.Fatalf("logout got %d: %s", rec.Code, rec.Body)
+	}
+	if rec = c.do(http.MethodGet, "/admin/api/models", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("the dropped cookie still works (got %d)", rec.Code)
 	}
 }
 
 func TestRepeatedFailuresLockTheAddressOut(t *testing.T) {
-	_, h := newTestServer(t)
+	_, srv := newTestServer(t)
+	h := srv.Handler()
 
-	attempt := func(addr string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(url.Values{
-			"username": {testUser},
-			"password": {"wrong"},
-		}.Encode()))
-		req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	attempt := func(addr, password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/login",
+			strings.NewReader(`{"username":"`+testUser+`","password":"`+password+`"}`))
+		req.Header.Set("content-type", "application/json")
 		req.RemoteAddr = addr + ":1234"
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -223,311 +258,442 @@ func TestRepeatedFailuresLockTheAddressOut(t *testing.T) {
 	}
 
 	for i := 0; i < maxFailedLogins; i++ {
-		if rec := attempt("203.0.113.9"); !strings.Contains(rec.Body.String(), "用户名或密码不正确") {
-			t.Fatalf("failure %d did not report a bad login: %s", i, rec.Body)
+		if rec := attempt("203.0.113.9", "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d got %d, want 401", i, rec.Code)
 		}
 	}
-	if rec := attempt("203.0.113.9"); !strings.Contains(rec.Body.String(), "失败次数过多") {
-		t.Fatalf("lockout not enforced: %s", rec.Body)
+	rec := attempt("203.0.113.9", "wrong")
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(errText(t, rec), "失败次数过多") {
+		t.Fatalf("lockout got %d: %s, want 429 with the wait", rec.Code, rec.Body)
 	}
 	// The lockout is checked before the credentials, so the right password does
-	// not help either while the window is open.
-	rec := attemptWithPassword(t, h, "203.0.113.9", testPass)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "失败次数过多") {
-		t.Errorf("locked address got %d, want the throttled login form", rec.Code)
+	// not help while the window is open.
+	if rec := attempt("203.0.113.9", testPass); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("locked address with the right password got %d, want 429", rec.Code)
+	}
+	if rec := attempt("203.0.113.10", testPass); rec.Code != http.StatusOK {
+		t.Errorf("another address got %d, want a session", rec.Code)
 	}
 
-	// Another address is unaffected.
-	if rec := attemptWithPassword(t, h, "203.0.113.10", testPass); rec.Code != http.StatusFound {
-		t.Errorf("unlocked address got %d, want a session", rec.Code)
+	// The wait the message promises is the one the server actually holds.
+	if got := srv.lockedFor("203.0.113.9"); got <= 0 || got > loginLockout {
+		t.Errorf("lockedFor = %v, want the rest of %v", got, loginLockout)
 	}
 }
 
-func attemptWithPassword(t *testing.T, h http.Handler, addr, password string) *httptest.ResponseRecorder {
+func TestMutationsNeedTheSessionToken(t *testing.T) {
+	st, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	good := map[string]any{"id": 0, "provider": "openai", "base_url": "https://x", "api_key": "k", "model": "m"}
+
+	for name, token := range map[string]string{
+		"no token": "",
+		"wrong":    strings.Repeat("0", 64),
+	} {
+		c.csrf = token
+		rec := c.do(http.MethodPost, "/admin/api/models", good)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s got %d, want 403 (%s)", name, rec.Code, rec.Body)
+		}
+		logIn(t, c)
+	}
+
+	if rows, err := st.ListModels(); err != nil || len(rows) != 0 {
+		t.Errorf("a refused request still wrote %d rows (err %v)", len(rows), err)
+	}
+}
+
+func TestStoredKeyNeverLeavesTheAPI(t *testing.T) {
+	st, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	const key = "sk-live-abcdef1234567890"
+	cfg := &store.ModelConfig{Provider: store.ProviderOpenAI, BaseURL: "https://api.example.com", APIKey: key, Model: "gpt-test"}
+	if err := st.SaveModel(cfg); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Both the list and the row the save call returns must carry the mask only.
+	bodies := []string{c.do(http.MethodGet, "/admin/api/models", nil).Body.String()}
+
+	rec := c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": cfg.ID, "name": "改名", "provider": store.ProviderOpenAI,
+		"base_url": "https://api.example.com", "api_key": "", "model": "gpt-test",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edit got %d: %s", rec.Code, rec.Body)
+	}
+	bodies = append(bodies, rec.Body.String())
+
+	for _, body := range bodies {
+		if strings.Contains(body, key) {
+			t.Errorf("response leaked the stored key: %s", body)
+		}
+		if !strings.Contains(body, maskKey(key)) {
+			t.Errorf("response has no mask for the key: %s", body)
+		}
+	}
+	for _, field := range []string{"api_key", "pass_hash", "password"} {
+		if strings.Contains(bodies[0], `"`+field+`"`) {
+			t.Errorf("the list response carries a %q field", field)
+		}
+	}
+
+	// The blank key field was an instruction, not data: the secret stayed.
+	again, err := st.GetModel(cfg.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if again.APIKey != key {
+		t.Errorf("stored key = %q, want the one that was already there", again.APIKey)
+	}
+}
+
+func TestModelRoundTripThroughTheAPI(t *testing.T) {
+	st, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	rec := c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": 0, "name": "备用", "provider": "Anthropic", "base_url": "https://api.anthropic.com",
+		"api_key": "sk-ant-1234567890", "model": "claude-test", "persona": "回答要短",
+		"temperature": 0.3, "max_tokens": 512, "timeout_ms": 30000, "enabled": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create got %d: %s", rec.Code, rec.Body)
+	}
+	created := jsonOf(t, rec)
+	if created["provider"] != store.ProviderAnthropic {
+		t.Errorf("provider = %v, want the lowercased choice", created["provider"])
+	}
+	if created["enabled"] != true {
+		t.Error("the checked row came back inactive")
+	}
+	if created["key_given"] != true {
+		t.Error("key_given is false for a row that has a key")
+	}
+	id := int64(created["id"].(float64))
+	if id == 0 {
+		t.Error("create did not report the new id")
+	}
+	stamp, err := time.Parse(time.RFC3339, created["updated_at"].(string))
+	if err != nil {
+		t.Errorf("updated_at = %v, want RFC3339 the app can format: %v", created["updated_at"], err)
+	}
+	if stamp.Before(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("updated_at = %v, want the save time rather than a zero timestamp", created["updated_at"])
+	}
+
+	// Enabling a second row retires the first, in one write.
+	rec = c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": 0, "name": "主用", "provider": "gemini", "base_url": "https://generativelanguage.googleapis.com",
+		"api_key": "AIza-1234567890", "model": "gemini-test", "temperature": 1,
+		"max_tokens": 1024, "timeout_ms": 45000, "enabled": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second create got %d: %s", rec.Code, rec.Body)
+	}
+	main := jsonOf(t, rec)
+	mainID := int64(main["id"].(float64))
+
+	active, ok, err := st.ActiveModel()
+	if err != nil || !ok || active.Name != "主用" {
+		t.Fatalf("active = %+v (ok %v, err %v), want 主用", active, ok, err)
+	}
+
+	rec = c.do(http.MethodPost, "/admin/api/models/enable", map[string]any{"id": id})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable got %d: %s", rec.Code, rec.Body)
+	}
+	if got := jsonOf(t, rec)["active_id"]; got != float64(id) {
+		t.Errorf("active_id = %v, want %d", got, id)
+	}
+	if enabled := countEnabled(t, c); enabled != 1 {
+		t.Errorf("enabled rows = %d, want exactly one", enabled)
+	}
+
+	// Defaults belong to the server, not to a placeholder in the form.
+	rec = c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": mainID, "name": "主用", "provider": "openai", "base_url": "https://api.openai.com/v1",
+		"api_key": "k2", "model": "gpt-test", "temperature": 0.7, "max_tokens": 0, "timeout_ms": 0,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update got %d: %s", rec.Code, rec.Body)
+	}
+	updated := jsonOf(t, rec)
+	if updated["max_tokens"] != float64(1024) || updated["timeout_ms"] != float64(45000) {
+		t.Errorf("zero knobs = %v/%v, want the 1024 and 45000 defaults", updated["max_tokens"], updated["timeout_ms"])
+	}
+	if updated["enabled"] != false {
+		t.Error("an update that left the checkbox out kept the row active")
+	}
+
+	// The two one-field calls refuse a row that is not there.
+	for _, target := range []string{"/admin/api/models/enable", "/admin/api/models/delete"} {
+		rec := c.do(http.MethodPost, target, map[string]any{"id": 9999})
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s for a missing id got %d, want 404", target, rec.Code)
+		}
+		if rec = c.do(http.MethodPost, target, map[string]any{"id": 0}); rec.Code != http.StatusBadRequest {
+			t.Errorf("POST %s without an id got %d, want 400", target, rec.Code)
+		}
+	}
+
+	rec = c.do(http.MethodPost, "/admin/api/models/delete", map[string]any{"id": id})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete got %d: %s", rec.Code, rec.Body)
+	}
+	if _, err := st.GetModel(id); err != store.ErrNotFound {
+		t.Errorf("GetModel after delete = %v, want ErrNotFound", err)
+	}
+	c.do(http.MethodPost, "/admin/api/models/delete", map[string]any{"id": mainID})
+	if rows := rowsOf(t, c); len(rows) != 0 {
+		t.Errorf("rows left = %v, want none", rows)
+	}
+}
+
+func countEnabled(t *testing.T, c *client) int {
+	t.Helper()
+	var n int
+	for _, raw := range rowsOf(t, c) {
+		if row, _ := raw.(map[string]any); row["enabled"] == true {
+			n++
+		}
+	}
+	return n
+}
+
+func TestIncompleteRowIsRefusedByName(t *testing.T) {
+	st, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	rec := c.do(http.MethodPost, "/admin/api/models", map[string]any{
+		"id": 0, "provider": "mistral", "base_url": "", "api_key": "", "model": "", "persona": "说人话",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("incomplete save got %d: %s, want 400", rec.Code, rec.Body)
+	}
+	msg := errText(t, rec)
+	for _, want := range []string{"name", "provider", "api base url", "api key", "model"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want %q listed", msg, want)
+		}
+	}
+	if rows, _ := st.ListModels(); len(rows) != 0 {
+		t.Errorf("a refused row was stored anyway: %+v", rows)
+	}
+}
+
+func TestBadRequestsAreRejectedBeforeTheStore(t *testing.T) {
+	st, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	cases := map[string]struct {
+		body  string
+		field string
+	}{
+		"empty body":            {body: "", field: "请求体为空"},
+		"not json":              {body: `<html>`, field: "请求格式不正确"},
+		"unknown field":         {body: `{"id":0,"api_key":"k","key_masked":"sneaky"}`, field: "key_masked"},
+		"array instead":         {body: `[{"id":1}]`, field: "请求格式不正确"},
+		"id in the wrong place": {body: `{"id":"abc"}`, field: "请求格式不正确"},
+	}
+	for name, tc := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/models", strings.NewReader(tc.body))
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set(csrfHeader, c.csrf)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: c.cookie})
+		req.RemoteAddr = "10.0.0.1:1"
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s got %d: %s, want 400", name, rec.Code, rec.Body)
+			continue
+		}
+		if !strings.Contains(errText(t, rec), tc.field) {
+			t.Errorf("%s error = %q, want it to name %q", name, errText(t, rec), tc.field)
+		}
+	}
+	if rows, _ := st.ListModels(); len(rows) != 0 {
+		t.Errorf("malformed requests wrote %d rows", len(rows))
+	}
+}
+
+func TestReadOnlyRoutesRefuseOtherMethods(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	rec := c.do(http.MethodGet, "/admin/api/login", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET the login endpoint got %d, want 405", rec.Code)
+	}
+	for _, target := range []string{"/admin/api/models", "/admin/api/providers", "/admin/api/session"} {
+		rec := c.do(http.MethodDelete, target, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s got %d, want 405", http.MethodDelete, target, rec.Code)
+		}
+	}
+}
+
+func TestProvidersComeFromTheStore(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	rec := c.do(http.MethodGet, "/admin/api/providers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("providers got %d: %s", rec.Code, rec.Body)
+	}
+	anyOf := jsonOf(t, rec)["providers"].([]any)
+	if len(anyOf) != 3 {
+		t.Fatalf("providers = %v, want the three the store validates", anyOf)
+	}
+	var values []string
+	for _, p := range anyOf {
+		opt := p.(map[string]any)
+		values = append(values, opt["value"].(string))
+		if opt["label"] == "" {
+			t.Errorf("provider %v has no label for the dropdown", opt)
+		}
+		if !store.ValidProvider(opt["value"].(string)) {
+			t.Errorf("provider %v would be rejected by the store", opt["value"])
+		}
+	}
+	for _, want := range []string{"openai", "anthropic", "gemini"} {
+		if !strings.Contains(strings.Join(values, ","), want) {
+			t.Errorf("providers = %v, want %s in the list", values, want)
+		}
+	}
+}
+
+func TestSessionCookieFlagsFollowTheProxyScheme(t *testing.T) {
+	_, srv := newTestServer(t)
+	h := srv.Handler()
+
+	// Over plain http (a tunnel to 127.0.0.1) Secure must stay off, or the
+	// browser drops the cookie and the panel looks broken.
+	rec := loginRequest(t, h, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login got %d: %s", rec.Code, rec.Body)
+	}
+	if set := rec.Header().Get("Set-Cookie"); strings.Contains(set, "Secure") {
+		t.Errorf("plain-http session cookie marked Secure: %s", set)
+	}
+	for _, want := range []string{"HttpOnly", "SameSite=Lax", "Path=/admin"} {
+		if !strings.Contains(rec.Header().Get("Set-Cookie"), want) {
+			t.Errorf("cookie missing %q: %s", want, rec.Header().Get("Set-Cookie"))
+		}
+	}
+
+	// Behind the front proxy the forwarded proto is what the browser used.
+	rec = loginRequest(t, h, http.Header{"X-Forwarded-Proto": {"https"}})
+	set := rec.Header().Get("Set-Cookie")
+	if !strings.Contains(set, "Secure") {
+		t.Errorf("proxied cookie missing Secure: %s", set)
+	}
+}
+
+func loginRequest(t *testing.T, h http.Handler, header http.Header) *httptest.ResponseRecorder {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(url.Values{
-		"username": {testUser},
-		"password": {password},
-	}.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	req.RemoteAddr = addr + ":1234"
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/login",
+		strings.NewReader(`{"username":"`+testUser+`","password":"`+testPass+`"}`))
+	req.Header.Set("content-type", "application/json")
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Set(k, v)
+		}
+	}
+	req.RemoteAddr = "10.0.0.2:1"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
 }
 
-func TestWritesNeedTheSessionsCSRFToken(t *testing.T) {
-	st, h := newTestServer(t)
-	cookie, csrf := logIn(t, h)
+func TestStaticBundleIsServedFromTheBinary(t *testing.T) {
+	_, srv := newTestServer(t)
+	h := srv.Handler()
 
-	for _, tc := range []struct{ name, token string }{
-		{"missing", ""},
-		{"wrong", strings.Repeat("0", len(csrf))},
-	} {
-		v := url.Values{"id": {"0"}, "provider": {"openai"}, "base_url": {"https://x"}, "api_key": {"k"}, "model": {"m"}}
-		if tc.token != "" {
-			v.Set("csrf", tc.token)
-		}
-		if rec := do(t, h, http.MethodPost, "/admin/models/save", cookie, v); rec.Code != http.StatusBadRequest {
-			t.Errorf("%s csrf got %d body=%s, want 400", tc.name, rec.Code, rec.Body)
-		}
-	}
-	if rows, err := st.ListModels(); err != nil || len(rows) != 0 {
-		t.Errorf("a request without a valid token wrote %d rows", len(rows))
-	}
-}
-
-func TestStoredKeyOnlyEverAppearsMasked(t *testing.T) {
-	st, h := newTestServer(t)
-	cookie, _ := logIn(t, h)
-	const key = "sk-live-abcdef1234567890"
-
-	cfg := &store.ModelConfig{Provider: "openai", BaseURL: "https://api.example.com", APIKey: key, Model: "gpt-test"}
-	if err := st.SaveModel(cfg); err != nil {
-		t.Fatalf("seed model: %v", err)
+	// Nothing built into dist: the panel must say how to build it rather than
+	// serve a blank page that looks like a crash.
+	rec := getStatic(t, h, "/admin/")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("empty bundle got %d: %s, want 503", rec.Code, rec.Body)
 	}
 
-	pages := map[string]string{
-		"list": get(t, h, cookie, "/admin/models"),
-		"edit": get(t, h, cookie, "/admin/models/form?id="+itoa(cfg.ID)),
-	}
-	for name, body := range pages {
-		if strings.Contains(body, key) {
-			t.Errorf("%s page leaked the stored key", name)
-		}
-		if !strings.Contains(body, maskKey(key)) {
-			t.Errorf("%s page does not show the mask %q: %s", name, maskKey(key), body)
-		}
-	}
-	if !strings.Contains(pages["edit"], `value=""`) {
-		t.Error("edit form carries a key value instead of an empty field")
-	}
-}
+	srv.dist = buildFS()
 
-func TestModelRoundTripThroughThePanel(t *testing.T) {
-	st, h := newTestServer(t)
-	cookie, csrf := logIn(t, h)
-
-	save := func(v url.Values) string {
-		t.Helper()
-		rec := postForm(t, h, "/admin/models/save", cookie, csrf, v)
-		if rec.Code != http.StatusFound {
-			t.Fatalf("save got %d body=%s", rec.Code, rec.Body)
-		}
-		return rec.Header().Get("Location")
+	if rec = getStatic(t, h, "/admin/"); rec.Code != http.StatusOK {
+		t.Fatalf("index got %d: %s", rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("content-type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("index content-type = %q", ct)
+	}
+	if rec.Header().Get("cache-control") != "no-store" {
+		t.Errorf("index cache-control = %q, want no-store so a replaced bundle loads immediately", rec.Header().Get("cache-control"))
+	}
+	if !strings.Contains(rec.Body.String(), "<div id=\"app\">") {
+		t.Errorf("index body = %s", rec.Body)
 	}
 
-	first := url.Values{
-		"id": {"0"}, "name": {"备用"}, "provider": {"Anthropic"}, "base_url": {"https://api.anthropic.com"},
-		"api_key": {"sk-ant-1234567890"}, "model": {"claude-test"}, "persona": {"回答要短"},
-		"temperature": {"0.3"}, "max_tokens": {"512"}, "timeout_ms": {"30000"}, "enabled": {"1"},
-	}
-	if loc := save(first); loc != "/admin/models?flash=saved" {
-		t.Fatalf("save redirected to %q", loc)
-	}
-
-	rows, err := st.ListModels()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("saved %d rows, want 1", len(rows))
-	}
-	id := rows[0].ID
-	if rows[0].Provider != store.ProviderAnthropic {
-		t.Errorf("provider = %q, want the lowercased choice", rows[0].Provider)
-	}
-	if !rows[0].Enabled {
-		t.Error("checked row was not stored active")
-	}
-
-	// A second active row steals the flag from the first.
-	second := url.Values{
-		"id": {"0"}, "name": {"主用"}, "provider": {"gemini"}, "base_url": {"https://generativelanguage.googleapis.com"},
-		"api_key": {"AIza-1234567890"}, "model": {"gemini-test"}, "temperature": {"1"}, "enabled": {"1"},
-	}
-	save(second)
-	active, ok, err := st.ActiveModel()
-	if err != nil || !ok {
-		t.Fatalf("active model: ok=%v err=%v", ok, err)
-	}
-	if active.Name != "主用" {
-		t.Errorf("active row is %q, want the newest one", active.Name)
-	}
-
-	// Editing with a blank key field keeps the stored secret.
-	if loc := save(url.Values{
-		"id": {itoa(id)}, "name": {"备用改"}, "provider": {"openai"}, "base_url": {"https://api.openai.com/v1"},
-		"api_key": {"  "}, "model": {"gpt-test"}, "temperature": {"0.7"}, "max_tokens": {"bad"},
-	}); loc == "" {
-		t.Fatal("edit did not redirect")
-	}
-	edited, err := st.GetModel(id)
-	if err != nil {
-		t.Fatalf("get edited: %v", err)
-	}
-	if edited.APIKey != "sk-ant-1234567890" {
-		t.Errorf("blank key field wiped the stored key: %q", edited.APIKey)
-	}
-	if edited.MaxTokens != 1024 {
-		t.Errorf("unparsable max_tokens = %d, want the default", edited.MaxTokens)
-	}
-	if edited.Enabled {
-		t.Error("an edit that left the checkbox out kept the row active")
-	}
-
-	rec := postForm(t, h, "/admin/models/enable", cookie, csrf, url.Values{"id": {itoa(id)}})
-	if rec.Header().Get("Location") != "/admin/models?flash=enabled" {
-		t.Fatalf("enable redirected to %q", rec.Header().Get("Location"))
-	}
-	if active, _, _ := st.ActiveModel(); active.ID != id {
-		t.Error("enable did not make this row the active one")
-	}
-
-	rec = postForm(t, h, "/admin/models/delete", cookie, csrf, url.Values{"id": {itoa(id)}})
-	if rec.Header().Get("Location") != "/admin/models?flash=deleted" {
-		t.Fatalf("delete redirected to %q", rec.Header().Get("Location"))
-	}
-	if _, err := st.GetModel(id); err != store.ErrNotFound {
-		t.Errorf("get deleted row = %v, want ErrNotFound", err)
-	}
-	if body := get(t, h, cookie, "/admin/models?flash=deleted"); !strings.Contains(body, "已删除") {
-		t.Error("the delete flash was not rendered")
-	}
-
-	// Deleting whichever row is left empties the list, which is its own page.
-	rec = postForm(t, h, "/admin/models/delete", cookie, csrf, url.Values{"id": {itoa(findID(t, st, "主用"))}})
-	if rec.Code != http.StatusFound {
-		t.Fatalf("second delete got %d", rec.Code)
-	}
-	if body := get(t, h, cookie, "/admin/models"); !strings.Contains(body, "还没有配置") {
-		t.Errorf("empty list state missing: %s", body)
-	}
-}
-
-// findID looks a stored row up by name, because the panel only ever reveals ids
-// through a redirect.
-func findID(t *testing.T, st *store.Store, name string) int64 {
-	t.Helper()
-
-	rows, err := st.ListModels()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	for _, r := range rows {
-		if r.Name == name {
-			return r.ID
-		}
-	}
-	t.Fatalf("no row named %q stored", name)
-	return 0
-}
-
-func TestRejectedSaveEchoesTheFormBack(t *testing.T) {
-	st, h := newTestServer(t)
-	cookie, csrf := logIn(t, h)
-
-	rec := postForm(t, h, "/admin/models/save", cookie, csrf, url.Values{
-		"id": {"0"}, "provider": {"not-a-provider"}, "base_url": {""}, "api_key": {"typed-key"}, "model": {""},
-	})
+	// Hashed assets are safe to cache forever; the entry document is not.
+	rec = getStatic(t, h, "/admin/assets/app-abc123.js")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("invalid save got %d, want the form back", rec.Code)
+		t.Fatalf("asset got %d: %s", rec.Code, rec.Body)
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "保存失败") {
-		t.Errorf("no save error rendered: %s", body)
+	if ct := rec.Header().Get("content-type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("asset content-type = %q", ct)
 	}
-	if !strings.Contains(body, `value="typed-key"`) {
-		t.Error("the key the operator just typed was thrown away")
-	}
-	if rows, _ := st.ListModels(); len(rows) != 0 {
-		t.Errorf("an invalid row was stored: %+v", rows)
-	}
-}
-
-func TestUnknownModelAndBadIDs(t *testing.T) {
-	st, h := newTestServer(t)
-	cookie, csrf := logIn(t, h)
-	seed := &store.ModelConfig{Provider: "openai", BaseURL: "https://x", APIKey: "k", Model: "m", Enabled: true}
-	if err := st.SaveModel(seed); err != nil {
-		t.Fatalf("seed: %v", err)
+	if cc := rec.Header().Get("cache-control"); !strings.Contains(cc, "immutable") {
+		t.Errorf("asset cache-control = %q", cc)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/models/form?id=999", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("missing row got %d, want 404", rec.Code)
+	// A missing asset is a 404, not the app: a stale index.html referencing a
+	// hashed file would otherwise mask the problem.
+	if rec = getStatic(t, h, "/admin/assets/gone-abc123.css"); rec.Code != http.StatusNotFound {
+		t.Errorf("missing asset got %d, want 404", rec.Code)
+	}
+	// An extension-less path is the app's own route.
+	if rec = getStatic(t, h, "/admin/anything"); rec.Code != http.StatusOK {
+		t.Errorf("spa fallback got %d, want index.html", rec.Code)
 	}
 
-	for _, target := range []string{"/admin/models/enable", "/admin/models/delete"} {
-		rec := postForm(t, h, target, cookie, csrf, url.Values{"id": {"not-a-number"}})
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("%s with a bad id got %d, want 400", target, rec.Code)
-		}
-	}
-
-	// The active row survives an enable that names a row which does not exist.
-	rec = postForm(t, h, "/admin/models/enable", cookie, csrf, url.Values{"id": {"999"}})
-	if rec.Code != http.StatusFound {
-		t.Fatalf("enable of a missing row got %d", rec.Code)
-	}
-	if active, ok, _ := st.ActiveModel(); !ok || active.ID != seed.ID {
-		t.Error("a failed enable changed the active row")
-	}
-}
-
-func TestReadOnlyRoutesRefuseWrites(t *testing.T) {
-	_, h := newTestServer(t)
-	cookie, csrf := logIn(t, h)
-
-	for _, target := range []string{"/admin/models", "/admin/models/form"} {
-		rec := postForm(t, h, target, cookie, csrf, nil)
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Errorf("POST %s got %d, want 405", target, rec.Code)
-		}
-	}
-}
-
-func TestLoginFormIsPublicAndSessionCookieIsHardened(t *testing.T) {
-	_, h := newTestServer(t)
-
-	body := get(t, h, "", "/admin/login")
-	if !strings.Contains(body, "登录") {
-		t.Fatalf("login form missing: %s", body)
-	}
-
-	// Over plain http (a tunnel to 127.0.0.1) Secure must stay off, or the
-	// browser would drop the cookie; behind the proxy it must be on.
-	rec := do(t, h, http.MethodPost, "/admin/login", "", url.Values{"username": {testUser}, "password": {testPass}})
-	if c := sessionCookieOf(t, rec); strings.Contains(rec.Header().Get("Set-Cookie"), "Secure") {
-		t.Errorf("plain-http session cookie marked Secure: %v", c)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(url.Values{
-		"username": {testUser}, "password": {testPass},
-	}.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Forwarded-Proto", "https")
-	req.RemoteAddr = "10.0.0.2:1"
+	// The bare path redirects so relative asset URLs resolve.
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	cookie := sessionCookieOf(t, rec)
-	sc := rec.Header().Get("Set-Cookie")
-	for _, want := range []string{"Secure", "HttpOnly", "SameSite=Lax", "Path=/admin"} {
-		if !strings.Contains(sc, want) {
-			t.Errorf("proxied cookie missing %q: %s", want, sc)
-		}
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/admin/" {
+		t.Errorf("/admin got %d -> %q", rec.Code, rec.Header().Get("Location"))
 	}
 
-	// The panel itself, not the login form, is what the proxied session reaches.
-	if body := get(t, h, cookie, "/admin/models"); !strings.Contains(body, "退出") {
-		t.Errorf("proxied session did not reach the panel: %s", body)
+	if rec = getStaticMethod(t, h, http.MethodPost, "/admin/"); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST a static path got %d, want 405", rec.Code)
 	}
 }
 
-func itoa(n int64) string {
-	return strconv.FormatInt(n, 10)
+func buildFS() fstest.MapFS {
+	return fstest.MapFS{
+		"index.html":           &fstest.MapFile{Data: []byte(`<!doctype html><div id="app"></div>`)},
+		"assets/app-abc123.js": &fstest.MapFile{Data: []byte(`console.log(1)`), Mode: 0},
+	}
+}
+
+func getStatic(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	return getStaticMethod(t, h, http.MethodGet, target)
+}
+
+func getStaticMethod(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

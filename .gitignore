@@ -7,3 +7,9 @@ local-notes.md
 README.local.md
 # SQLite 库文件（管理员口令哈希与模型 API Key 都在里面）
 data/
+
+# The bundle is compiled by the Dockerfile node stage; only the placeholder
+# that keeps go:embed valid is tracked.
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep

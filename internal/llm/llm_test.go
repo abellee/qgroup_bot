@@ -312,10 +312,10 @@ func TestGuardsSendNothing(t *testing.T) {
 	stub := newStub(t, 200, `{"choices":[{"message":{"content":"x"}}]}`)
 
 	cases := map[string]Config{
-		"no key":        {Provider: "openai", BaseURL: stub.url, Model: "m"},
-		"no base":       {Provider: "openai", APIKey: "k", Model: "m"},
-		"blank base":    {Provider: "openai", BaseURL: "   ", APIKey: "k", Model: "m"},
-		"unknown":       {Provider: "mistral", BaseURL: stub.url, APIKey: "k", Model: "m"},
+		"no key":         {Provider: "openai", BaseURL: stub.url, Model: "m"},
+		"no base":        {Provider: "openai", APIKey: "k", Model: "m"},
+		"blank base":     {Provider: "openai", BaseURL: "   ", APIKey: "k", Model: "m"},
+		"unknown":        {Provider: "mistral", BaseURL: stub.url, APIKey: "k", Model: "m"},
 		"empty provider": {BaseURL: stub.url, APIKey: "k", Model: "m"},
 	}
 	for name, cfg := range cases {

@@ -9,3 +9,5 @@ bin/
 local.env
 local-notes.md
 README.local.md
+web/node_modules/
+web/dist/

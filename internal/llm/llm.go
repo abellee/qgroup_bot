@@ -134,7 +134,7 @@ func (c *Client) anthropic(ctx context.Context, cfg Config, prompt string) (stri
 	}
 	url := joinBase(cfg.BaseURL, "/v1") + "/messages"
 	headers := map[string]string{
-		"x-api-key":        cfg.APIKey,
+		"x-api-key":         cfg.APIKey,
 		"anthropic-version": anthropicVersion,
 	}
 	if err := c.post(ctx, url, headers, body, &out); err != nil {

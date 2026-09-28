@@ -1,15 +1,14 @@
 // Package admin is the back-end the operator uses to point the bot at a model.
-// It is a small cookie-session panel over the same listener as the callback: one
-// administrator account, one 模型 menu, and nothing else to click.
+// The browser side is a Vue single-page app built from web/; this package only
+// speaks JSON under /admin/api and serves the compiled bundle under /admin.
 package admin
 
 import (
 	"crypto/rand"
 	"crypto/subtle"
-	"embed"
 	"encoding/hex"
 	"errors"
-	"html/template"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,15 +19,17 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"qgroup-bot/internal/store"
+	"qgroup-bot/web"
 )
-
-//go:embed templates/*.html
-var templateFS embed.FS
 
 const (
 	sessionCookie = "qgb_admin"
 	sessionPath   = "/admin"
 	sessionTTL    = 12 * time.Hour
+
+	// csrfHeader is what every mutating request must carry. The token comes from
+	// the session endpoint, so a third-party page cannot read it cross-origin.
+	csrfHeader = "X-Csrf-Token"
 
 	// maxFailedLogins is the point where an address has to wait. The panel is
 	// reachable through the public host name, so guessing the administrator
@@ -43,7 +44,7 @@ const (
 type Server struct {
 	st       *store.Store
 	log      *slog.Logger
-	tmpl     *template.Template
+	dist     fs.FS
 	mu       sync.Mutex
 	sess     map[string]*session
 	throttle map[string]*failedLogins
@@ -62,14 +63,14 @@ type failedLogins struct {
 }
 
 func New(st *store.Store, log *slog.Logger) (*Server, error) {
-	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
+	dist, err := web.Dist()
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
 		st:       st,
 		log:      log,
-		tmpl:     tmpl,
+		dist:     dist,
 		sess:     map[string]*session{},
 		throttle: map[string]*failedLogins{},
 	}, nil
@@ -93,33 +94,33 @@ func HashPassword(plain string) (string, error) {
 // Handler is the panel mounted under /admin.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/admin", s.toModels)
-	mux.HandleFunc("/admin/", s.toModels)
-	mux.HandleFunc("/admin/login", s.handleLogin)
-	mux.HandleFunc("/admin/logout", s.authed(s.handleLogout))
-	mux.HandleFunc("/admin/models", s.authed(s.handleModels))
-	mux.HandleFunc("/admin/models/form", s.authed(s.handleForm))
-	mux.HandleFunc("/admin/models/save", s.authed(s.handleSave))
-	mux.HandleFunc("/admin/models/enable", s.authed(s.handleEnable))
-	mux.HandleFunc("/admin/models/delete", s.authed(s.handleDelete))
+	mux.HandleFunc("/admin/api/login", s.handleLogin)
+	mux.HandleFunc("/admin/api/logout", s.authed(s.handleLogout))
+	mux.HandleFunc("/admin/api/session", s.handleSession)
+	mux.HandleFunc("/admin/api/models", s.authed(s.handleModels))
+	mux.HandleFunc("/admin/api/models/enable", s.authed(s.handleEnable))
+	mux.HandleFunc("/admin/api/models/delete", s.authed(s.handleDelete))
+	mux.HandleFunc("/admin/api/providers", s.authed(s.handleProviders))
+
+	// Everything else is the bundle: the app itself and its hashed assets.
+	mux.HandleFunc("/admin/", s.serveStatic)
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusFound)
+	})
 	return mux
 }
 
-func (s *Server) toModels(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/admin/models", http.StatusFound)
-}
-
-// authed guards every page that is not the login form, and checks the csrf token
-// a POST must carry.
+// authed guards every endpoint that is not the login form, and checks the csrf
+// header a mutating request must carry.
 func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := s.session(r)
 		if sess == nil {
-			http.Redirect(w, r, "/admin/login", http.StatusFound)
+			writeError(w, http.StatusUnauthorized, "未登录")
 			return
 		}
-		if r.Method == http.MethodPost && !s.csrfOK(r, sess) {
-			http.Error(w, "表单已过期，请重新提交", http.StatusBadRequest)
+		if r.Method != http.MethodGet && !s.csrfOK(r, sess) {
+			writeError(w, http.StatusForbidden, "会话校验失败，请刷新页面重试")
 			return
 		}
 		next(w, r)
@@ -155,7 +156,7 @@ func (s *Server) dropSession(r *http.Request) {
 }
 
 func (s *Server) csrfOK(r *http.Request, sess *session) bool {
-	got := r.FormValue("csrf")
+	got := r.Header.Get(csrfHeader)
 	return subtle.ConstantTimeCompare([]byte(got), []byte(sess.csrf)) == 1
 }
 
@@ -185,55 +186,6 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, adminID in
 		MaxAge:   int(sessionTTL / time.Second),
 	})
 	return sess
-}
-
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		s.render(w, "login", &pageData{Title: "登录"})
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		s.render(w, "login", &pageData{Title: "登录", Err: "表单读取失败"})
-		return
-	}
-
-	addr := clientAddr(r)
-	data := &pageData{Title: "登录", Username: strings.TrimSpace(r.FormValue("username"))}
-
-	if wait := s.lockedFor(addr); wait > 0 {
-		data.Err = "失败次数过多，请 " + fmtDuration(wait) + " 后重试"
-		s.render(w, "login", data)
-		return
-	}
-
-	admin, err := s.st.AdminByUsername(data.Username)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		admin = nil
-	case err != nil:
-		s.log.Error("admin lookup failed", "error", err)
-		data.Err = "登录暂时不可用"
-		s.render(w, "login", data)
-		return
-	}
-
-	if admin == nil || bcrypt.CompareHashAndPassword([]byte(admin.PassHash), []byte(r.FormValue("password"))) != nil {
-		s.noteFailure(addr)
-		data.Err = "用户名或密码不正确"
-		s.render(w, "login", data)
-		return
-	}
-
-	s.noteSuccess(addr)
-	s.startSession(w, r, admin.ID, admin.Username)
-	s.log.Info("admin login", "username", admin.Username, "addr", addr)
-	http.Redirect(w, r, "/admin/models", http.StatusFound)
-}
-
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	s.dropSession(r)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: sessionPath, MaxAge: -1, HttpOnly: true})
-	http.Redirect(w, r, "/admin/login", http.StatusFound)
 }
 
 // lockedFor reports how long this address still has to wait, or 0.
