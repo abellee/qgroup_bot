@@ -23,6 +23,13 @@ type Directory interface {
 	UserExists(ctx context.Context, email string) (bool, error)
 }
 
+// WelcomeSink remembers members whose approval just landed, so the group
+// greeting can fire on their first message. It is optional: a nil sink means
+// approvals happen without any welcome bookkeeping.
+type WelcomeSink interface {
+	Remember(memberOpenID, groupOpenID string)
+}
+
 // Service decides the fate of one join request: the answer given to the group's
 // verification question must be the email of a registered sub2api account.
 //
@@ -30,14 +37,17 @@ type Directory interface {
 // answers, an unregistered email, a lookup that fails - leaves the request
 // pending for a human, and nothing is ever auto-rejected.
 type Service struct {
-	qq     *qqbot.Client
-	dir    Directory
-	groups map[string]struct{}
-	log    *slog.Logger
+	qq      *qqbot.Client
+	dir     Directory
+	groups  map[string]struct{}
+	welcome WelcomeSink
+	log     *slog.Logger
 }
 
-func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, log *slog.Logger) *Service {
-	return &Service{qq: qq, dir: dir, groups: groups, log: log}
+// NewService wires the approver. A nil welcome sink leaves the greeting
+// bookkeeping out, which is the default when no welcome copy is configured.
+func NewService(qq *qqbot.Client, dir Directory, groups map[string]struct{}, welcome WelcomeSink, log *slog.Logger) *Service {
+	return &Service{qq: qq, dir: dir, groups: groups, welcome: welcome, log: log}
 }
 
 func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
@@ -99,6 +109,12 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	if err := s.qq.ApproveJoin(ctx, ev); err != nil {
 		s.log.Error("join approval failed", append(logFields, "action", "approve", "error", err)...)
 		return
+	}
+	// The platform refuses a reply to a join event and refuses active
+	// messages, so the greeting cannot leave now; the sink remembers the
+	// member and the group greeting fires on their first own message.
+	if s.welcome != nil {
+		s.welcome.Remember(ev.MemberOpenID, ev.GroupOpenID)
 	}
 	s.log.Info("join review", append(logFields, "action", "approve", "took", time.Since(start).String())...)
 }

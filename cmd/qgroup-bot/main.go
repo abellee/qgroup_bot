@@ -51,7 +51,10 @@ func run() error {
 
 	qq := qqbot.NewClient(cfg.QQAPIBase, cfg.AppID, cfg.AppSecret, httpUpstream)
 	dir := sub2api.New(cfg.Sub2APIBase, cfg.Sub2APIAdminKey, cfg.Sub2APIUserRoute, httpUpstream)
-	svc := approval.NewService(qq, dir, cfg.AllowedGroups, log)
+	// Approved members are remembered here so their first own message can carry
+	// the group greeting - the join event itself cannot be replied to.
+	pendingWelcomes := chat.NewPendingWelcomes()
+	svc := approval.NewService(qq, dir, cfg.AllowedGroups, pendingWelcomes, log)
 
 	// SQLite holds the administrator and the model configurations. The join
 	// approval needs neither, so a database that cannot be opened - an unmounted
@@ -74,6 +77,11 @@ func run() error {
 	var handlers []chat.Handler
 	var panel http.Handler
 	var panelPath string
+	if cfg.Welcome != "" {
+		// Ahead of the model reply, so a new member is greeted before the
+		// persona answers whatever they said.
+		handlers = append(handlers, chat.NewWelcome(pendingWelcomes, cfg.Welcome, qq, log).HandleGroupMessage)
+	}
 	if st != nil {
 		handlers = append(handlers, chat.NewModelReply(st, completer, qq, log).HandleGroupMessage)
 

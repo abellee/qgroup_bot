@@ -39,6 +39,11 @@ type Config struct {
 	TurnstileSiteKey   string
 	TurnstileSecretKey string
 
+	// Welcome is the markdown announced in the group once a newly approved
+	// member sends their first message; the join event itself cannot carry a
+	// reply credential. Empty keeps the group greeting off.
+	Welcome string
+
 	Upstream time.Duration
 }
 
@@ -61,6 +66,7 @@ func Load() (*Config, error) {
 		AdminPassword:      os.Getenv("QGB_ADMIN_PASSWORD"),
 		TurnstileSiteKey:   os.Getenv("QGB_TURNSTILE_SITE_KEY"),
 		TurnstileSecretKey: os.Getenv("QGB_TURNSTILE_SECRET_KEY"),
+		Welcome:            strings.ReplaceAll(env("QGB_WELCOME_MARKDOWN", ""), `\n`, "\n"),
 	}
 
 	if c.AppID == "" {

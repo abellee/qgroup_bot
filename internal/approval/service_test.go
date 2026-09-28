@@ -99,6 +99,32 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+type welcomeSink struct {
+	member, group string
+	calls         int
+}
+
+func (w *welcomeSink) Remember(member, group string) {
+	w.calls++
+	w.member, w.group = member, group
+}
+
+// An approval hands the member to the welcome sink; the other outcomes never
+// reach it.
+func TestApprovalRemembersTheMemberForTheWelcome(t *testing.T) {
+	stub := &qqStub{}
+	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
+	sink := &welcomeSink{}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, sink, discardLogger())
+
+	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
+	svc.HandleJoin(context.Background(), qaEvent("g1", "m2", "jr2", "请填写注册邮箱", "stranger@other.com"))
+
+	if sink.calls != 1 || sink.member != "m1" || sink.group != "g1" {
+		t.Errorf("sink = %+v, want exactly the approved member remembered", sink)
+	}
+}
+
 func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestEvent {
 	return &qqbot.JoinRequestEvent{
 		GroupOpenID:   group,
@@ -121,7 +147,7 @@ func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestE
 func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "我的邮箱 Real@User.com"))
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m2", "jr2", "请填写注册邮箱", "stranger@other.com"))
@@ -151,7 +177,7 @@ func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 func TestVerifyMessageFallback(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), &qqbot.JoinRequestEvent{
 		GroupOpenID: "g1", MemberOpenID: "m1", JoinRequestID: "jr1",
@@ -166,7 +192,7 @@ func TestVerifyMessageFallback(t *testing.T) {
 func TestInvitedJoinsAreLeftToHumans(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	ev := qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com")
 	ev.ApplySource = qqbot.ApplySourceInvited
@@ -184,7 +210,7 @@ func TestInvitedJoinsAreLeftToHumans(t *testing.T) {
 func TestLookupFailureLeavesRequestPending(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{err: errors.New("unreachable")}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "real@user.com"))
 	if len(stub.reviewed()) != 0 {
@@ -196,7 +222,7 @@ func TestLookupFailureLeavesRequestPending(t *testing.T) {
 func TestBareQQNumberAnswerGetsTheQQDomain(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"751077517@qq.com": true}}
-	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, discardLogger())
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱自动审批", " 751077517 "))
 	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
