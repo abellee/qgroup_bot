@@ -28,7 +28,7 @@
 
 	<label>
 		<span>API Key</span>
-		<input type="text" name="api_key" value="{{$f.KeyValue}}" placeholder="{{if .KeyGiven}}已保存 {{$f.KeyMasked}}，留空则不修改{{else}}填完整密钥{{end}}">
+		<input type="text" name="api_key" value="{{$f.KeyValue}}" placeholder="{{if $f.KeyGiven}}已保存 {{$f.KeyMasked}}，留空则不修改{{else}}填完整密钥{{end}}">
 	</label>
 
 	<label>
