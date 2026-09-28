@@ -11,6 +11,7 @@ type providerOption struct {
 
 var providerLabels = []providerOption{
 	{store.ProviderOpenAI, "OpenAI 兼容"},
+	{store.ProviderOpenAIResponses, "OpenAI Responses"},
 	{store.ProviderAnthropic, "Anthropic"},
 	{store.ProviderGemini, "Gemini"},
 }

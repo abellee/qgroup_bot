@@ -689,8 +689,8 @@ func TestProvidersComeFromTheStore(t *testing.T) {
 		t.Fatalf("providers got %d: %s", rec.Code, rec.Body)
 	}
 	anyOf := jsonOf(t, rec)["providers"].([]any)
-	if len(anyOf) != 3 {
-		t.Fatalf("providers = %v, want the three the store validates", anyOf)
+	if len(anyOf) != 4 {
+		t.Fatalf("providers = %v, want the four the store validates", anyOf)
 	}
 	var values []string
 	for _, p := range anyOf {
@@ -703,7 +703,7 @@ func TestProvidersComeFromTheStore(t *testing.T) {
 			t.Errorf("provider %v would be rejected by the store", opt["value"])
 		}
 	}
-	for _, want := range []string{"openai", "anthropic", "gemini"} {
+	for _, want := range []string{"openai", "openai-responses", "anthropic", "gemini"} {
 		if !strings.Contains(strings.Join(values, ","), want) {
 			t.Errorf("providers = %v, want %s in the list", values, want)
 		}

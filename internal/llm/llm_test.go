@@ -154,6 +154,66 @@ func TestOpenAIWithoutPersona(t *testing.T) {
 	}
 }
 
+func TestResponsesRequestShape(t *testing.T) {
+	// A reasoning item rides along because real gpt-5-class answers carry one;
+	// only the message item's output_text is the answer.
+	stub := newStub(t, 200, `{"status":"completed","output":[
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"思考"}]},
+		{"type":"message","role":"assistant","content":[
+			{"type":"output_text","text":"答"},
+			{"type":"output_text","text":"案"}]}]}`)
+	cfg := openAIConfig(stub.url)
+	cfg.Provider = "openai-responses"
+	cfg.Model = "gpt-5"
+
+	got, err := stub.client.Complete(context.Background(), cfg, "怎么注册")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if got != "答案" {
+		t.Errorf("answer = %q, want the output_text parts joined", got)
+	}
+
+	rec := stub.last(t)
+	if rec.path != "/v1/responses" {
+		t.Errorf("path = %q, want /v1/responses", rec.path)
+	}
+	if auth := rec.header.Get("authorization"); auth != "Bearer sk-test" {
+		t.Errorf("authorization = %q, want the bearer key", auth)
+	}
+	if rec.body["model"] != "gpt-5" {
+		t.Errorf("model = %v, want the configured model", rec.body["model"])
+	}
+	if rec.body["input"] != "怎么注册" {
+		t.Errorf("input = %v, want the group message", rec.body["input"])
+	}
+	if rec.body["instructions"] != "你是群助手" {
+		t.Errorf("instructions = %v, want the persona", rec.body["instructions"])
+	}
+	if n, _ := rec.body["max_output_tokens"].(float64); n != 64 {
+		t.Errorf("max_output_tokens = %v, want 64", rec.body["max_output_tokens"])
+	}
+	if _, ok := rec.body["temperature"]; ok {
+		t.Error("temperature sent on the responses path: reasoning models reject it")
+	}
+	if _, ok := rec.body["messages"]; ok {
+		t.Error("messages sent on the responses path: that is the chat completions shape")
+	}
+}
+
+// An empty output with a non-completed status is a failure naming the status,
+// not a silent empty answer.
+func TestResponsesIncompleteRunIsAnError(t *testing.T) {
+	stub := newStub(t, 200, `{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}`)
+	cfg := openAIConfig(stub.url)
+	cfg.Provider = "openai-responses"
+
+	_, err := stub.client.Complete(context.Background(), cfg, "问题")
+	if err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Errorf("err = %v, want the incomplete status named", err)
+	}
+}
+
 func TestAnthropicRequestShape(t *testing.T) {
 	stub := newStub(t, 200, `{"content":[{"type":"text","text":"部"},{"type":"text","text":"分"},{"type":"thinking","text":"skip"}]}`)
 	cfg := Config{

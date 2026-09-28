@@ -33,6 +33,7 @@ const keyGiven = computed(() => !!(props.row && props.row.key_given))
 // url is visible before it silently fails in the group.
 const protocolHint = computed(() => {
   const base = form.base_url.trim().replace(/\/+$/, '') || 'https://your-api-host'
+  if (form.provider === 'openai-responses') return `${base}/v1/responses · 头 Authorization: Bearer · 不发送温度`
   if (form.provider === 'anthropic') return `${base}/v1/messages · 头 x-api-key`
   if (form.provider === 'gemini') return `${base}/v1beta/models/${form.model || '模型名'}:generateContent · 头 x-goog-api-key`
   return `${base}/v1/chat/completions · 头 Authorization: Bearer`

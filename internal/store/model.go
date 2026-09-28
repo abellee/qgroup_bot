@@ -10,15 +10,16 @@ import (
 // Providers the reply path speaks. Each one has its own request shape in
 // internal/llm; nothing else in the code branches on these strings.
 const (
-	ProviderOpenAI    = "openai"
-	ProviderAnthropic = "anthropic"
-	ProviderGemini    = "gemini"
+	ProviderOpenAI          = "openai"
+	ProviderOpenAIResponses = "openai-responses"
+	ProviderAnthropic       = "anthropic"
+	ProviderGemini          = "gemini"
 )
 
-// ValidProvider reports whether p is one of the three the panel offers.
+// ValidProvider reports whether p is one of the four the panel offers.
 func ValidProvider(p string) bool {
 	switch p {
-	case ProviderOpenAI, ProviderAnthropic, ProviderGemini:
+	case ProviderOpenAI, ProviderOpenAIResponses, ProviderAnthropic, ProviderGemini:
 		return true
 	}
 	return false

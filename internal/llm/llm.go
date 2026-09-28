@@ -60,6 +60,8 @@ func (c *Client) Complete(ctx context.Context, cfg Config, prompt string) (strin
 	switch strings.ToLower(cfg.Provider) {
 	case "openai":
 		return c.openai(ctx, cfg, prompt)
+	case "openai-responses":
+		return c.responses(ctx, cfg, prompt)
 	case "anthropic":
 		return c.anthropic(ctx, cfg, prompt)
 	case "gemini":
@@ -110,6 +112,70 @@ func (c *Client) openai(ctx context.Context, cfg Config, prompt string) (string,
 		return "", fmt.Errorf("no choices returned")
 	}
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+}
+
+// responses speaks the OpenAI Responses protocol (/v1/responses). The persona
+// rides in instructions and the prompt in input; temperature is not sent at
+// all, because the reasoning models this protocol exists for reject it, and
+// sampling knobs are marginal next to the persona for a group reply.
+func (c *Client) responses(ctx context.Context, cfg Config, prompt string) (string, error) {
+	body := map[string]any{
+		"model":             cfg.Model,
+		"input":             prompt,
+		"max_output_tokens": cfg.MaxTokens,
+	}
+	if p := strings.TrimSpace(cfg.Persona); p != "" {
+		body["instructions"] = p
+	}
+	var out struct {
+		Status string `json:"status"`
+		Error  *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	url := joinBase(cfg.BaseURL, "/v1") + "/responses"
+	if err := c.post(ctx, url, map[string]string{"Authorization": "Bearer " + cfg.APIKey}, body, &out); err != nil {
+		return "", err
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("%s: %s", firstNonEmpty(out.Error.Type, "api error"), out.Error.Message)
+	}
+
+	// Reasoning and tool items are not the answer; only message items carry
+	// the output_text the group should see.
+	var sb strings.Builder
+	for _, item := range out.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			if part.Type == "output_text" {
+				sb.WriteString(part.Text)
+			}
+		}
+	}
+	if sb.Len() == 0 {
+		if out.Status != "" && out.Status != "completed" {
+			reason := ""
+			if out.IncompleteDetails != nil {
+				reason = " (" + out.IncompleteDetails.Reason + ")"
+			}
+			return "", fmt.Errorf("no output returned, status %s%s", out.Status, reason)
+		}
+		return "", fmt.Errorf("no output returned")
+	}
+	return strings.TrimSpace(sb.String()), nil
 }
 
 func (c *Client) anthropic(ctx context.Context, cfg Config, prompt string) (string, error) {
