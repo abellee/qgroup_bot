@@ -53,4 +53,5 @@ export const api = {
   deleteModel: (id) => request('/models/delete', { method: 'POST', body: { id } }),
   testModel: (id, prompt) => request('/models/test', { method: 'POST', body: { id, prompt } }),
   remoteModels: (payload) => request('/models/remote', { method: 'POST', body: payload }),
+  updateAccount: (payload) => request('/account', { method: 'POST', body: payload }),
 }

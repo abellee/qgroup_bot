@@ -168,3 +168,10 @@ func (s *Store) UpdateAdminPassword(id int64, passHash string) error {
 	_, err := s.db.Exec(`UPDATE admin_users SET pass_hash = ? WHERE id = ?`, passHash, id)
 	return err
 }
+
+// UpdateAdminUsername renames one administrator. The UNIQUE index refuses a
+// name another account already holds.
+func (s *Store) UpdateAdminUsername(id int64, username string) error {
+	_, err := s.db.Exec(`UPDATE admin_users SET username = ? WHERE id = ?`, username, id)
+	return err
+}

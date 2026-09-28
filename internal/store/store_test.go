@@ -55,6 +55,29 @@ func TestAdminRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAdminUsernameUpdate(t *testing.T) {
+	st := newStore(t)
+
+	id, err := st.CreateAdmin("operator", "hash-1")
+	if err != nil {
+		t.Fatalf("CreateAdmin: %v", err)
+	}
+	if err := st.UpdateAdminUsername(id, "root"); err != nil {
+		t.Fatalf("UpdateAdminUsername: %v", err)
+	}
+
+	if _, err := st.AdminByUsername("operator"); err != ErrNotFound {
+		t.Errorf("AdminByUsername(old) err = %v, want ErrNotFound", err)
+	}
+	a, err := st.AdminByUsername("root")
+	if err != nil {
+		t.Fatalf("AdminByUsername(new): %v", err)
+	}
+	if a.ID != id || a.PassHash != "hash-1" {
+		t.Errorf("AdminByUsername(new) = %+v, want the same account with its hash intact", a)
+	}
+}
+
 func openRow(name, provider string) *ModelConfig {
 	return &ModelConfig{
 		Name:        name,

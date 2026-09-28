@@ -355,6 +355,83 @@ func (s *Server) handleModelRemote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"models": ids})
 }
 
+// accountRequest changes the administrator's own credentials. The old password
+// is the second factor here: a stolen tab alone cannot rename the account or
+// swap the hash.
+type accountRequest struct {
+	OldPassword string `json:"old_password"`
+	Username    string `json:"username"`
+	NewPassword string `json:"new_password"`
+}
+
+func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "只接受 POST")
+		return
+	}
+	sess := s.session(r)
+	if sess == nil {
+		writeError(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	var in accountRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	admin, err := s.st.AdminByUsername(sess.username)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnauthorized, "账号已不存在，请重新登录")
+		return
+	}
+	if err != nil {
+		s.log.Error("admin lookup failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "读取失败")
+		return
+	}
+	if !passwordMatches(admin, in.OldPassword) {
+		writeError(w, http.StatusBadRequest, "旧密码不正确")
+		return
+	}
+
+	name := strings.TrimSpace(in.Username)
+	nameChanged := name != "" && name != admin.Username
+	passChanged := in.NewPassword != ""
+	if !nameChanged && !passChanged {
+		writeError(w, http.StatusBadRequest, "没有要修改的内容")
+		return
+	}
+
+	// Both writes are validated before either lands, so a refused password
+	// never leaves a half-applied change behind.
+	var hash string
+	if passChanged {
+		if hash, err = HashPassword(in.NewPassword); err != nil {
+			writeError(w, http.StatusBadRequest, "新密码不可用："+err.Error())
+			return
+		}
+	}
+	if nameChanged {
+		if err := s.st.UpdateAdminUsername(admin.ID, name); err != nil {
+			s.log.Error("admin rename failed", "error", err)
+			writeError(w, http.StatusBadRequest, "改用户名失败：这个名字可能已被占用")
+			return
+		}
+	}
+	if passChanged {
+		if err := s.st.UpdateAdminPassword(admin.ID, hash); err != nil {
+			s.log.Error("admin password update failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "保存失败")
+			return
+		}
+	}
+
+	// Every session dies with the old credentials, the caller's included: the
+	// operator signs back in with what they just set.
+	s.dropAllSessions()
+	s.log.Info("admin account updated", "renamed", nameChanged, "password_changed", passChanged, "addr", clientAddr(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // testRequest is the body of the test dialog: one stored row and one prompt,
 // the same single turn a group @ would send.
 type testRequest struct {

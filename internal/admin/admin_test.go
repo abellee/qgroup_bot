@@ -273,6 +273,7 @@ func TestEveryDataRouteRefusesAnAnonymousCaller(t *testing.T) {
 		{http.MethodPost, "/admin/api/models/delete", map[string]any{"id": 1}},
 		{http.MethodPost, "/admin/api/models/test", map[string]any{"id": 1, "prompt": "x"}},
 		{http.MethodPost, "/admin/api/models/remote", map[string]any{"id": 1, "provider": "openai"}},
+		{http.MethodPost, "/admin/api/account", map[string]any{"old_password": "x"}},
 		{http.MethodPost, "/admin/api/logout", map[string]any{}},
 	}
 	for _, tc := range cases {
@@ -689,6 +690,73 @@ func stringSliceOf(t *testing.T, v any) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// Renaming the account and rotating the password both demand the old password,
+// and every session dies with the change.
+func TestAccountUpdateRotatesCredentials(t *testing.T) {
+	st, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	rec := c.do(http.MethodPost, "/admin/api/account", map[string]any{
+		"old_password": "wrong", "username": "operator", "new_password": "brand-new-pass",
+	})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(errText(t, rec), "旧密码") {
+		t.Fatalf("wrong old password got %d: %s", rec.Code, rec.Body)
+	}
+
+	if rec = c.do(http.MethodPost, "/admin/api/account", map[string]any{"old_password": testPass}); rec.Code != http.StatusBadRequest {
+		t.Errorf("an update with nothing to change got %d, want 400", rec.Code)
+	}
+
+	rec = c.do(http.MethodPost, "/admin/api/account", map[string]any{
+		"old_password": testPass, "username": "operator", "new_password": "brand-new-pass",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update got %d: %s", rec.Code, rec.Body)
+	}
+
+	// The session that made the change is gone with the rest of them.
+	if rec = c.do(http.MethodGet, "/admin/api/models", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("the old session after the update got %d, want 401", rec.Code)
+	}
+
+	c2 := newClient(t, srv)
+	if rec = c2.do(http.MethodPost, "/admin/api/login", map[string]string{"username": "operator", "password": "brand-new-pass"}); rec.Code != http.StatusOK {
+		t.Fatalf("login with the new credentials got %d: %s", rec.Code, rec.Body)
+	}
+
+	c3 := newClient(t, srv)
+	if rec = c3.do(http.MethodPost, "/admin/api/login", map[string]string{"username": testUser, "password": testPass}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("login with the old username got %d, want 401", rec.Code)
+	}
+	if rec = c3.do(http.MethodPost, "/admin/api/login", map[string]string{"username": "operator", "password": testPass}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("login with the old password got %d, want 401", rec.Code)
+	}
+
+	if n, err := st.CountAdmins(); err != nil || n != 1 {
+		t.Errorf("CountAdmins = %d, %v, want the same single account", n, err)
+	}
+}
+
+func TestAccountUpdateRefusesAnOverLongPassword(t *testing.T) {
+	_, srv := newTestServer(t)
+	c := newClient(t, srv)
+	logIn(t, c)
+
+	rec := c.do(http.MethodPost, "/admin/api/account", map[string]any{
+		"old_password": testPass, "new_password": strings.Repeat("x", 73),
+	})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(errText(t, rec), "72") {
+		t.Fatalf("over-long password got %d: %s", rec.Code, rec.Body)
+	}
+
+	// Nothing was written, so the old password still opens the door.
+	c2 := newClient(t, srv)
+	if rec = c2.do(http.MethodPost, "/admin/api/login", map[string]string{"username": testUser, "password": testPass}); rec.Code != http.StatusOK {
+		t.Errorf("login with the untouched password got %d, want 200", rec.Code)
+	}
 }
 
 func TestIncompleteRowIsRefusedByName(t *testing.T) {

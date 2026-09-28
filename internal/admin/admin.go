@@ -148,6 +148,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(s.path+"/api/models/delete", s.authed(s.handleDelete))
 	mux.HandleFunc(s.path+"/api/models/remote", s.authed(s.handleModelRemote))
 	mux.HandleFunc(s.path+"/api/models/test", s.authed(s.handleModelTest))
+	mux.HandleFunc(s.path+"/api/account", s.authed(s.handleAccountUpdate))
 	mux.HandleFunc(s.path+"/api/providers", s.authed(s.handleProviders))
 
 	// Everything else is the bundle: the app itself and its hashed assets.
@@ -201,6 +202,14 @@ func (s *Server) dropSession(r *http.Request) {
 		delete(s.sess, c.Value)
 		s.mu.Unlock()
 	}
+}
+
+// dropAllSessions clears every live session. Credentials that just changed must
+// not leave older sessions holding the door.
+func (s *Server) dropAllSessions() {
+	s.mu.Lock()
+	s.sess = map[string]*session{}
+	s.mu.Unlock()
 }
 
 func (s *Server) csrfOK(r *http.Request, sess *session) bool {

@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { api, setCSRF } from '@/api'
+import AccountDialog from '@/components/AccountDialog.vue'
 import LoginView from '@/views/LoginView.vue'
 import ModelsView from '@/views/ModelsView.vue'
 
@@ -8,6 +9,7 @@ import ModelsView from '@/views/ModelsView.vue'
 // never flashes the model list at a logged-out operator.
 const state = ref('loading')
 const username = ref('')
+const accountOpen = ref(false)
 
 function apply(session) {
   if (session && session.authenticated) {
@@ -19,6 +21,19 @@ function apply(session) {
   setCSRF('')
   username.value = ''
   state.value = 'anonymous'
+}
+
+function signOut() {
+  accountOpen.value = false
+  apply({ authenticated: false })
+  api.logout().catch(() => {})
+}
+
+// The account dialog signs the operator out server-side; the login form is
+// where the new credentials are proven.
+function accountUpdated() {
+  accountOpen.value = false
+  apply({ authenticated: false })
 }
 
 onMounted(async () => {
@@ -40,12 +55,20 @@ onMounted(async () => {
       <div class="brand">QQ 群<span>机器人</span>后台</div>
       <nav>
         <span>{{ username }}</span>
-        <button class="plain small" @click="apply({ authenticated: false }); api.logout().catch(() => {})">退出</button>
+        <button class="plain small" @click="accountOpen = true">账号</button>
+        <button class="plain small" @click="signOut">退出</button>
       </nav>
     </header>
 
     <main class="wrap">
       <ModelsView @signed-out="apply({ authenticated: false })" />
     </main>
+
+    <AccountDialog
+      v-if="accountOpen"
+      :username="username"
+      @close="accountOpen = false"
+      @updated="accountUpdated"
+    />
   </div>
 </template>
