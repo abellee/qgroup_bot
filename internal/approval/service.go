@@ -14,9 +14,9 @@ import (
 
 var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
-// Directory looks up an exact email or username and reports account status and use.
+// Directory looks up an exact email or username and reports account status and activity.
 type Directory interface {
-	FindUser(ctx context.Context, identifier string, byEmail bool) (exists, active, used bool, err error)
+	FindUser(ctx context.Context, identifier string, byEmail bool) (exists, active, activity bool, err error)
 }
 
 // WelcomeSink remembers members whose approval just landed, so the group
@@ -26,8 +26,8 @@ type WelcomeSink interface {
 	Remember(memberOpenID, groupOpenID string)
 }
 
-// Service approves only active sub2api accounts with recorded service usage,
-// identified by email or username.
+// Service approves only active sub2api accounts with non-announcement activity
+// since registration, identified by email or username.
 //
 // Every other outcome leaves the request pending for a human, and nothing is
 // ever auto-rejected.
@@ -95,7 +95,7 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 		logFields = append(logFields, "identifier_type", lookupType)
 	}
 
-	found, active, used, err := s.dir.FindUser(ctx, identifier, byEmail)
+	found, active, activity, err := s.dir.FindUser(ctx, identifier, byEmail)
 	if err != nil {
 		s.log.Error("join review deferred: sub2api lookup failed",
 			append(logFields, "error", err)...)
@@ -111,9 +111,9 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 			append(logFields, "reason", "user not active", "lookup_type", lookupType)...)
 		return
 	}
-	if !used {
-		s.log.Info("join review left to manual: user has no recorded service usage",
-			append(logFields, "reason", "no service usage", "lookup_type", lookupType)...)
+	if !activity {
+		s.log.Info("join review left to manual: user has no non-announcement activity since registration",
+			append(logFields, "reason", "no non-announcement activity since registration", "lookup_type", lookupType)...)
 		return
 	}
 

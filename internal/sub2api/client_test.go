@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
 type recorded struct {
-	head  http.Header
-	query url.Values
+	head       http.Header
+	query      url.Values
+	auditQuery url.Values
 }
 
 // newStub serves a canned admin response and records how it was asked.
@@ -19,7 +21,12 @@ func newStub(t *testing.T, body string) (string, *recorded) {
 	rec := &recorded{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.head = r.Header.Clone()
-		rec.query = r.URL.Query()
+		if strings.HasSuffix(r.URL.Path, "/audit-logs") {
+			rec.auditQuery = r.URL.Query()
+			body = `{"code":0,"data":{"items":[{"method":"POST","path":"/api/v1/announcements/17/read"}],"total":1,"page":1,"page_size":200}}`
+		} else {
+			rec.query = r.URL.Query()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
 	}))
@@ -30,7 +37,7 @@ func newStub(t *testing.T, body string) (string, *recorded) {
 const realEmail = "abellee@example.com"
 
 func TestFindUserByEmailUsesAdminKeyAndExactMatch(t *testing.T) {
-	base, rec := newStub(t, `{"code":0,"message":"success","data":{"total":1,"items":[{"email":"`+realEmail+`","username":"abel","status":"active","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
+	base, rec := newStub(t, `{"code":0,"message":"success","data":{"total":1,"items":[{"id":4,"email":"`+realEmail+`","username":"abel","status":"active","created_at":"2026-11-12T00:00:00Z","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
 	c := New(base, "admin-key", "/api/v1/admin/users", &http.Client{})
 
 	found, active, used, err := c.FindUser(context.Background(), realEmail, true)
@@ -77,7 +84,7 @@ func TestFindUserRejectsFuzzyEmailNeighbours(t *testing.T) {
 }
 
 func TestFindUserMatchesCaseAndPadding(t *testing.T) {
-	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":" AbelLee@Example.COM ","status":"active","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
+	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"id":4,"email":" AbelLee@Example.COM ","status":"active","created_at":"2026-11-12T00:00:00Z","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
 	found, active, used, err := c.FindUser(context.Background(), realEmail, true)
 	if err != nil {
@@ -89,7 +96,7 @@ func TestFindUserMatchesCaseAndPadding(t *testing.T) {
 }
 
 func TestFindUserMatchesUsernameAndReturnsStatus(t *testing.T) {
-	base, rec := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"other@example.com","username":"Abel","status":"disabled","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
+	base, rec := newStub(t, `{"code":0,"data":{"total":1,"items":[{"id":4,"email":"other@example.com","username":"Abel","status":"disabled","created_at":"2026-11-12T00:00:00Z","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
 	found, active, used, err := c.FindUser(context.Background(), "abel", false)
 	if err != nil {
@@ -115,15 +122,92 @@ func TestFindUserDoesNotMatchEmailWhenLookingUpUsername(t *testing.T) {
 	}
 }
 
-func TestFindUserReportsNoUsageWithoutLastUsedAt(t *testing.T) {
-	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"`+realEmail+`","username":"abel","status":"active","last_used_at":null}]}}`)
+func TestFindUserReportsNoOtherActivityWhenOnlyAnnouncementReadsExist(t *testing.T) {
+	base, rec := newStub(t, `{"code":0,"data":{"total":1,"items":[{"id":7,"email":"`+realEmail+`","username":"abel","status":"active","created_at":"2026-11-12T00:00:00Z","last_used_at":null}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
-	found, active, used, err := c.FindUser(context.Background(), realEmail, true)
+	found, active, activity, err := c.FindUser(context.Background(), realEmail, true)
 	if err != nil {
 		t.Fatalf("FindUser: %v", err)
 	}
-	if !found || !active || used {
-		t.Errorf("FindUser = (%v, %v, %v), want (true, true, false)", found, active, used)
+	if !found || !active || activity {
+		t.Errorf("FindUser = (%v, %v, %v), want (true, true, false)", found, active, activity)
+	}
+	if rec.auditQuery.Get("actor_user_id") != "7" || rec.auditQuery.Get("start_time") != "2026-11-12T00:00:00Z" {
+		t.Errorf("audit query = %v, want user 7 since registration", rec.auditQuery)
+	}
+}
+
+func TestFindUserDetectsOtherActivitySinceRegistration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/audit-logs") {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"items":[{"method":"POST","path":"/api/v1/keys"}],"total":1,"page":1,"page_size":200}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"total":1,"items":[{"id":8,"email":"` + realEmail + `","username":"abel","status":"active","created_at":"2026-11-12T00:00:00Z","last_used_at":null}]}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k", "/api/v1/admin/users", &http.Client{})
+	found, active, activity, err := c.FindUser(context.Background(), realEmail, true)
+	if err != nil || !found || !active || !activity {
+		t.Fatalf("FindUser = (%v, %v, %v, %v), want active user with activity", found, active, activity, err)
+	}
+}
+
+func TestAnnouncementReadAuditEntriesDoNotCountAsOtherActivity(t *testing.T) {
+	if !isPassiveAuditEntry("POST", "/api/v1/announcements/123/read") {
+		t.Fatal("announcement read should not count as other activity")
+	}
+	for _, tc := range []struct {
+		method, path string
+		passive      bool
+	}{
+		{"POST", "/api/v1/keys", false},
+		{"PUT", "/api/v1/user", false},
+		{"DELETE", "/api/v1/keys/1", false},
+		{"POST", "/api/v1/auth/login", true},
+		{"POST", "/api/v1/auth/refresh", true},
+		{"POST", "/api/v1/auth/revoke-all-sessions", true},
+		{"POST", "/api/v1/announcements/123/read/extra", false},
+	} {
+		if isPassiveAuditEntry(tc.method, tc.path) != tc.passive {
+			t.Errorf("isPassiveAuditEntry(%q, %q) returned wrong value", tc.method, tc.path)
+		}
+	}
+}
+
+func TestFindUserIgnoresAPIUseBeforeRegistration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/audit-logs") {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"items":[],"total":0,"page":1,"page_size":200}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"total":1,"items":[{"id":9,"email":"` + realEmail + `","username":"abel","status":"active","created_at":"2026-11-12T00:00:00Z","last_used_at":"2026-11-11T00:00:00Z"}]}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k", "/api/v1/admin/users", &http.Client{})
+	_, _, activity, err := c.FindUser(context.Background(), realEmail, true)
+	if err != nil || activity {
+		t.Fatalf("activity = %v, err = %v; want no activity since registration", activity, err)
+	}
+}
+
+func TestFindUserFailsClosedWhenActivityLookupFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/audit-logs") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"code":500,"message":"unavailable"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"total":1,"items":[{"id":10,"email":"` + realEmail + `","username":"abel","status":"active","created_at":"2026-11-12T00:00:00Z","last_used_at":null}]}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k", "/api/v1/admin/users", &http.Client{})
+	found, _, _, err := c.FindUser(context.Background(), realEmail, true)
+	if !found || err == nil {
+		t.Fatalf("FindUser = (found=%v, err=%v), want found user and lookup error", found, err)
 	}
 }
 

@@ -21,7 +21,7 @@ type stubDirectory struct {
 	byEmail  []bool
 	members  map[string]bool
 	disabled map[string]bool
-	used     map[string]bool
+	activity map[string]bool
 	err      error
 }
 
@@ -34,7 +34,7 @@ func (s *stubDirectory) FindUser(_ context.Context, identifier string, byEmail b
 		return false, false, false, s.err
 	}
 	exists := s.members[identifier]
-	return exists, exists && !s.disabled[identifier], exists && s.used[identifier], nil
+	return exists, exists && !s.disabled[identifier], exists && s.activity[identifier], nil
 }
 
 func (s *stubDirectory) lookedUp() []string {
@@ -118,7 +118,7 @@ func (w *welcomeSink) Remember(member, group string) {
 // reach it.
 func TestApprovalRemembersTheMemberForTheWelcome(t *testing.T) {
 	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}, used: map[string]bool{"real@user.com": true}}
+	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}, activity: map[string]bool{"real@user.com": true}}
 	sink := &welcomeSink{}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, sink, discardLogger())
 
@@ -151,7 +151,7 @@ func qaEvent(group, member, joinID, question, answer string) *qqbot.JoinRequestE
 // because the bot no longer declines anything.
 func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}, used: map[string]bool{"real@user.com": true}}
+	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}, activity: map[string]bool{"real@user.com": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "请填写注册邮箱", "我的邮箱 Real@User.com"))
@@ -181,7 +181,7 @@ func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 // Groups still on message verification keep working.
 func TestVerifyMessageFallback(t *testing.T) {
 	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}, used: map[string]bool{"real@user.com": true}}
+	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}, activity: map[string]bool{"real@user.com": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), &qqbot.JoinRequestEvent{
@@ -228,7 +228,7 @@ func TestDisabledUserIsLeftForManualReview(t *testing.T) {
 	dir := &stubDirectory{
 		members:  map[string]bool{"real@user.com": true},
 		disabled: map[string]bool{"real@user.com": true},
-		used:     map[string]bool{"real@user.com": true},
+		activity: map[string]bool{"real@user.com": true},
 	}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
@@ -238,9 +238,8 @@ func TestDisabledUserIsLeftForManualReview(t *testing.T) {
 	}
 }
 
-// A login and announcement reads do not create usage_logs rows, so users with
-// no recorded service use remain pending for a human.
-func TestUserWithoutServiceUsageIsLeftForManualReview(t *testing.T) {
+// A user with no non-announcement action since signup remains pending.
+func TestUserWithoutOtherActivityIsLeftForManualReview(t *testing.T) {
 	stub := &qqStub{}
 	dir := &stubDirectory{members: map[string]bool{"real@user.com": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
@@ -254,7 +253,7 @@ func TestUserWithoutServiceUsageIsLeftForManualReview(t *testing.T) {
 // A bare number is a username, never an inferred QQ email address.
 func TestBareNumberIsLookedUpAsUsername(t *testing.T) {
 	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"751077517": true}, used: map[string]bool{"751077517": true}}
+	dir := &stubDirectory{members: map[string]bool{"751077517": true}, activity: map[string]bool{"751077517": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱自动审批", " 751077517 "))

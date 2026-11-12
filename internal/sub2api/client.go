@@ -44,16 +44,31 @@ type response struct {
 	Data    struct {
 		Total int `json:"total"`
 		Items []struct {
+			ID         int64      `json:"id"`
 			Email      string     `json:"email"`
 			Username   string     `json:"username"`
 			Status     string     `json:"status"`
 			LastUsedAt *time.Time `json:"last_used_at"`
+			CreatedAt  *time.Time `json:"created_at"`
 		} `json:"items"`
 	} `json:"data"`
 }
 
-// FindUser looks up a user by an exact email or username and reports whether
-// that user is active and has a recorded service use.
+type auditResponse struct {
+	Code    json.RawMessage `json:"code"`
+	Message string          `json:"message"`
+	Data    struct {
+		Total    int `json:"total"`
+		PageSize int `json:"page_size"`
+		Items    []struct {
+			Method string `json:"method"`
+			Path   string `json:"path"`
+		} `json:"items"`
+	} `json:"data"`
+}
+
+// FindUser looks up a user by exact email or username and reports whether the
+// account is active and has any non-announcement activity since registration.
 //
 // The admin user list search is fuzzy, so each returned row is checked against
 // the requested field before it counts.
@@ -96,10 +111,72 @@ func (c *Client) FindUser(ctx context.Context, identifier string, byEmail bool) 
 			value = item.Email
 		}
 		if strings.EqualFold(strings.TrimSpace(value), identifier) {
-			return true, strings.EqualFold(item.Status, "active"), item.LastUsedAt != nil, nil
+			if item.ID <= 0 || item.CreatedAt == nil {
+				return false, false, false, fmt.Errorf("sub2api user response is missing id or created_at")
+			}
+			activity, err := c.hasNonAnnouncementActivity(ctx, item.ID, *item.CreatedAt, item.LastUsedAt)
+			return true, strings.EqualFold(item.Status, "active"), activity, err
 		}
 	}
 	return false, false, false, nil
+}
+
+func (c *Client) hasNonAnnouncementActivity(ctx context.Context, userID int64, since time.Time, lastUsedAt *time.Time) (bool, error) {
+	if lastUsedAt != nil && !lastUsedAt.Before(since) {
+		return true, nil
+	}
+	for page := 1; ; page++ {
+		q := url.Values{}
+		q.Set("actor_user_id", fmt.Sprint(userID))
+		q.Set("start_time", since.UTC().Format(time.RFC3339))
+		q.Set("page", fmt.Sprint(page))
+		q.Set("page_size", fmt.Sprint(searchPageBounds))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/admin/audit-logs?"+q.Encode(), nil)
+		if err != nil {
+			return false, err
+		}
+		req.Header.Set("x-api-key", c.adminKey)
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return false, fmt.Errorf("query sub2api activity: %w", err)
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			return false, fmt.Errorf("read sub2api activity response: %w", readErr)
+		}
+		var out auditResponse
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return false, fmt.Errorf("decode sub2api activity response: %w (body=%s)", err, truncate(raw))
+		}
+		if string(out.Code) != "0" {
+			return false, fmt.Errorf("sub2api activity error http=%d code=%s message=%s", resp.StatusCode, string(out.Code), out.Message)
+		}
+		if len(out.Data.Items) == 0 && out.Data.Total > 0 {
+			return false, fmt.Errorf("sub2api activity pagination returned no items before total %d", out.Data.Total)
+		}
+		for _, item := range out.Data.Items {
+			if !isPassiveAuditEntry(item.Method, item.Path) {
+				return true, nil
+			}
+		}
+		pageSize := out.Data.PageSize
+		if pageSize <= 0 {
+			pageSize = len(out.Data.Items)
+		}
+		if page*pageSize >= out.Data.Total || out.Data.Total == 0 {
+			break
+		}
+	}
+	return false, nil
+}
+
+func isPassiveAuditEntry(method, path string) bool {
+	path = strings.TrimSuffix(path, "/")
+	if strings.HasPrefix(path, "/api/v1/auth/") {
+		return true
+	}
+	return method == http.MethodPost && strings.HasPrefix(path, "/api/v1/announcements/") && strings.HasSuffix(path, "/read")
 }
 
 func truncate(b []byte) string {
