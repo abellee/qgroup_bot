@@ -30,15 +30,15 @@ func newStub(t *testing.T, body string) (string, *recorded) {
 const realEmail = "abellee@example.com"
 
 func TestFindUserByEmailUsesAdminKeyAndExactMatch(t *testing.T) {
-	base, rec := newStub(t, `{"code":0,"message":"success","data":{"total":1,"items":[{"email":"`+realEmail+`","username":"abel","status":"active"}]}}`)
+	base, rec := newStub(t, `{"code":0,"message":"success","data":{"total":1,"items":[{"email":"`+realEmail+`","username":"abel","status":"active","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
 	c := New(base, "admin-key", "/api/v1/admin/users", &http.Client{})
 
-	found, active, err := c.FindUser(context.Background(), realEmail, true)
+	found, active, used, err := c.FindUser(context.Background(), realEmail, true)
 	if err != nil {
 		t.Fatalf("FindUser: %v", err)
 	}
-	if !found || !active {
-		t.Errorf("FindUser = (%v, %v), want (true, true)", found, active)
+	if !found || !active || !used {
+		t.Errorf("FindUser = (%v, %v, %v), want (true, true, true)", found, active, used)
 	}
 	if got := rec.head.Get("x-api-key"); got != "admin-key" {
 		t.Errorf("x-api-key = %q, want admin-key (sub2api rejects Authorization: Bearer)", got)
@@ -66,7 +66,7 @@ func TestFindUserRejectsFuzzyEmailNeighbours(t *testing.T) {
 	for _, c := range cases {
 		base, _ := newStub(t, c.body)
 		cl := New(base, "k", "/api/v1/admin/users", &http.Client{})
-		found, _, err := cl.FindUser(context.Background(), realEmail, true)
+		found, _, _, err := cl.FindUser(context.Background(), realEmail, true)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -77,26 +77,26 @@ func TestFindUserRejectsFuzzyEmailNeighbours(t *testing.T) {
 }
 
 func TestFindUserMatchesCaseAndPadding(t *testing.T) {
-	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":" AbelLee@Example.COM ","status":"active"}]}}`)
+	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":" AbelLee@Example.COM ","status":"active","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
-	found, active, err := c.FindUser(context.Background(), realEmail, true)
+	found, active, used, err := c.FindUser(context.Background(), realEmail, true)
 	if err != nil {
 		t.Fatalf("FindUser: %v", err)
 	}
-	if !found || !active {
-		t.Errorf("FindUser = (%v, %v), want an active case-insensitive match", found, active)
+	if !found || !active || !used {
+		t.Errorf("FindUser = (%v, %v, %v), want an active used case-insensitive match", found, active, used)
 	}
 }
 
 func TestFindUserMatchesUsernameAndReturnsStatus(t *testing.T) {
-	base, rec := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"other@example.com","username":"Abel","status":"disabled"}]}}`)
+	base, rec := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"other@example.com","username":"Abel","status":"disabled","last_used_at":"2026-11-13T00:00:00Z"}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
-	found, active, err := c.FindUser(context.Background(), "abel", false)
+	found, active, used, err := c.FindUser(context.Background(), "abel", false)
 	if err != nil {
 		t.Fatalf("FindUser: %v", err)
 	}
-	if !found || active {
-		t.Errorf("FindUser = (%v, %v), want (true, false) for disabled account", found, active)
+	if !found || active || !used {
+		t.Errorf("FindUser = (%v, %v, %v), want (true, false, true) for disabled used account", found, active, used)
 	}
 	if got := rec.query.Get("search"); got != "abel" {
 		t.Errorf("search = %q, want username", got)
@@ -106,12 +106,24 @@ func TestFindUserMatchesUsernameAndReturnsStatus(t *testing.T) {
 func TestFindUserDoesNotMatchEmailWhenLookingUpUsername(t *testing.T) {
 	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"abel","username":"another","status":"active"}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
-	found, _, err := c.FindUser(context.Background(), "abel", false)
+	found, _, _, err := c.FindUser(context.Background(), "abel", false)
 	if err != nil {
 		t.Fatalf("FindUser: %v", err)
 	}
 	if found {
 		t.Error("FindUser matched the email field when looking up a username")
+	}
+}
+
+func TestFindUserReportsNoUsageWithoutLastUsedAt(t *testing.T) {
+	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"`+realEmail+`","username":"abel","status":"active","last_used_at":null}]}}`)
+	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
+	found, active, used, err := c.FindUser(context.Background(), realEmail, true)
+	if err != nil {
+		t.Fatalf("FindUser: %v", err)
+	}
+	if !found || !active || used {
+		t.Errorf("FindUser = (%v, %v, %v), want (true, true, false)", found, active, used)
 	}
 }
 
@@ -135,7 +147,7 @@ func TestFindUserFailsClosed(t *testing.T) {
 			_, _ = w.Write([]byte(c.body))
 		}))
 		cl := New(srv.URL, "k", "/api/v1/admin/users", &http.Client{})
-		found, _, err := cl.FindUser(context.Background(), realEmail, true)
+		found, _, _, err := cl.FindUser(context.Background(), realEmail, true)
 		srv.Close()
 		if err == nil {
 			t.Errorf("%s: no error returned (found=%v)", c.name, found)

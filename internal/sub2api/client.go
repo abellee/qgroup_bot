@@ -44,19 +44,20 @@ type response struct {
 	Data    struct {
 		Total int `json:"total"`
 		Items []struct {
-			Email    string `json:"email"`
-			Username string `json:"username"`
-			Status   string `json:"status"`
+			Email      string     `json:"email"`
+			Username   string     `json:"username"`
+			Status     string     `json:"status"`
+			LastUsedAt *time.Time `json:"last_used_at"`
 		} `json:"items"`
 	} `json:"data"`
 }
 
 // FindUser looks up a user by an exact email or username and reports whether
-// that user has the active status required for automatic approval.
+// that user is active and has a recorded service use.
 //
 // The admin user list search is fuzzy, so each returned row is checked against
 // the requested field before it counts.
-func (c *Client) FindUser(ctx context.Context, identifier string, byEmail bool) (bool, bool, error) {
+func (c *Client) FindUser(ctx context.Context, identifier string, byEmail bool) (bool, bool, bool, error) {
 	q := url.Values{}
 	q.Set("search", identifier)
 	q.Set("page", "1")
@@ -64,30 +65,30 @@ func (c *Client) FindUser(ctx context.Context, identifier string, byEmail bool) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+c.userRoute+"?"+q.Encode(), nil)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	req.Header.Set("x-api-key", c.adminKey)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return false, false, fmt.Errorf("query sub2api: %w", err)
+		return false, false, false, fmt.Errorf("query sub2api: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return false, false, fmt.Errorf("read sub2api response: %w", err)
+		return false, false, false, fmt.Errorf("read sub2api response: %w", err)
 	}
 	var out response
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return false, false, fmt.Errorf("decode sub2api response: %w (body=%s)", err, truncate(raw))
+		return false, false, false, fmt.Errorf("decode sub2api response: %w (body=%s)", err, truncate(raw))
 	}
 	if string(out.Code) != "0" {
-		return false, false, fmt.Errorf("sub2api error http=%d code=%s message=%s", resp.StatusCode, string(out.Code), out.Message)
+		return false, false, false, fmt.Errorf("sub2api error http=%d code=%s message=%s", resp.StatusCode, string(out.Code), out.Message)
 	}
 	if out.Data.Total > len(out.Data.Items) {
 		// More matches than we fetched: absence cannot be concluded.
-		return false, false, fmt.Errorf("sub2api search truncated: %d matches, only %d fetched", out.Data.Total, len(out.Data.Items))
+		return false, false, false, fmt.Errorf("sub2api search truncated: %d matches, only %d fetched", out.Data.Total, len(out.Data.Items))
 	}
 	for _, item := range out.Data.Items {
 		value := item.Username
@@ -95,10 +96,10 @@ func (c *Client) FindUser(ctx context.Context, identifier string, byEmail bool) 
 			value = item.Email
 		}
 		if strings.EqualFold(strings.TrimSpace(value), identifier) {
-			return true, strings.EqualFold(item.Status, "active"), nil
+			return true, strings.EqualFold(item.Status, "active"), item.LastUsedAt != nil, nil
 		}
 	}
-	return false, false, nil
+	return false, false, false, nil
 }
 
 func truncate(b []byte) string {

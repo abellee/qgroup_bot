@@ -14,9 +14,9 @@ import (
 
 var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
-// Directory looks up an exact email or username and reports whether the user is active.
+// Directory looks up an exact email or username and reports account status and use.
 type Directory interface {
-	FindUser(ctx context.Context, identifier string, byEmail bool) (exists, active bool, err error)
+	FindUser(ctx context.Context, identifier string, byEmail bool) (exists, active, used bool, err error)
 }
 
 // WelcomeSink remembers members whose approval just landed, so the group
@@ -26,8 +26,8 @@ type WelcomeSink interface {
 	Remember(memberOpenID, groupOpenID string)
 }
 
-// Service decides the fate of one join request: only active sub2api accounts
-// identified by email or username are approved automatically.
+// Service approves only active sub2api accounts with recorded service usage,
+// identified by email or username.
 //
 // Every other outcome leaves the request pending for a human, and nothing is
 // ever auto-rejected.
@@ -95,7 +95,7 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 		logFields = append(logFields, "identifier_type", lookupType)
 	}
 
-	found, active, err := s.dir.FindUser(ctx, identifier, byEmail)
+	found, active, used, err := s.dir.FindUser(ctx, identifier, byEmail)
 	if err != nil {
 		s.log.Error("join review deferred: sub2api lookup failed",
 			append(logFields, "error", err)...)
@@ -109,6 +109,11 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	if !active {
 		s.log.Info("join review left to manual: user is not active",
 			append(logFields, "reason", "user not active", "lookup_type", lookupType)...)
+		return
+	}
+	if !used {
+		s.log.Info("join review left to manual: user has no recorded service usage",
+			append(logFields, "reason", "no service usage", "lookup_type", lookupType)...)
 		return
 	}
 
