@@ -14,13 +14,9 @@ import (
 
 var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
-// Applicants answer the group question with their QQ number, whose registered
-// address is the same digits at @qq.com.
-var qqNumberPattern = regexp.MustCompile(`^[0-9]+$`)
-
-// Directory answers whether an address belongs to a registered account.
+// Directory looks up an exact email or username and reports whether the user is active.
 type Directory interface {
-	UserExists(ctx context.Context, email string) (bool, error)
+	FindUser(ctx context.Context, identifier string, byEmail bool) (exists, active bool, err error)
 }
 
 // WelcomeSink remembers members whose approval just landed, so the group
@@ -30,12 +26,11 @@ type WelcomeSink interface {
 	Remember(memberOpenID, groupOpenID string)
 }
 
-// Service decides the fate of one join request: the answer given to the group's
-// verification question must be the email of a registered sub2api account.
+// Service decides the fate of one join request: only active sub2api accounts
+// identified by email or username are approved automatically.
 //
-// Approving is the only judgement made. Every other outcome - no email in the
-// answers, an unregistered email, a lookup that fails - leaves the request
-// pending for a human, and nothing is ever auto-rejected.
+// Every other outcome leaves the request pending for a human, and nothing is
+// ever auto-rejected.
 type Service struct {
 	qq      *qqbot.Client
 	dir     Directory
@@ -87,22 +82,33 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	}
 	start := time.Now()
 
-	email, ok := EmailFromEvent(ev)
+	identifier, byEmail, ok := IdentifierFromEvent(ev)
 	if !ok {
-		s.log.Info("join review ignored: no email in the answers", append(logFields, "reason", "no email")...)
+		s.log.Info("join review left to manual: no email or username in the answers", append(logFields, "reason", "no identifier")...)
 		return
 	}
-	logFields = append(logFields, "email", MaskEmail(email))
+	lookupType := "username"
+	if byEmail {
+		lookupType = "email"
+		logFields = append(logFields, "email", MaskEmail(identifier))
+	} else {
+		logFields = append(logFields, "identifier_type", lookupType)
+	}
 
-	found, err := s.dir.UserExists(ctx, email)
+	found, active, err := s.dir.FindUser(ctx, identifier, byEmail)
 	if err != nil {
 		s.log.Error("join review deferred: sub2api lookup failed",
 			append(logFields, "error", err)...)
 		return
 	}
 	if !found {
-		s.log.Info("join review ignored: email not registered",
-			append(logFields, "reason", "email not registered")...)
+		s.log.Info("join review left to manual: account not found",
+			append(logFields, "reason", "account not found", "lookup_type", lookupType)...)
+		return
+	}
+	if !active {
+		s.log.Info("join review left to manual: user is not active",
+			append(logFields, "reason", "user not active", "lookup_type", lookupType)...)
 		return
 	}
 
@@ -119,48 +125,39 @@ func (s *Service) HandleJoin(ctx context.Context, ev *qqbot.JoinRequestEvent) {
 	s.log.Info("join review", append(logFields, "action", "approve", "took", time.Since(start).String())...)
 }
 
-// EmailFromEvent reads the verification answers first, since the group now asks
-// for the email through a question; the free-text verify message stays as a
-// fallback for groups still using that verification mode.
-func EmailFromEvent(ev *qqbot.JoinRequestEvent) (string, bool) {
+// IdentifierFromEvent prefers an email wherever it appears, then treats the
+// first non-empty answer as a username. The free-text field remains supported.
+func IdentifierFromEvent(ev *qqbot.JoinRequestEvent) (string, bool, bool) {
 	for _, qa := range ev.VerifyInfo.ReviewQAList {
 		if email, ok := EmailFromAnswer(qa.Answer); ok {
-			return email, true
+			return email, true, true
 		}
 	}
-	return EmailFromAnswer(ev.VerifyInfo.VerifyMessage)
+	if email, ok := EmailFromAnswer(ev.VerifyInfo.VerifyMessage); ok {
+		return email, true, true
+	}
+	for _, qa := range ev.VerifyInfo.ReviewQAList {
+		if username := strings.TrimSpace(qa.Answer); username != "" {
+			return username, false, true
+		}
+	}
+	username := strings.TrimSpace(ev.VerifyInfo.VerifyMessage)
+	return username, false, username != ""
 }
 
-// EmailFromAnswer turns one piece of applicant text into an address: the first
-// email-looking token wins, and a bare QQ number stands for its @qq.com
-// address. A number mixed into prose is not a QQ number answer, so only text
-// that is nothing but digits gets the suffix.
-//
-// Whitespace is collapsed only after the text is read as typed, otherwise
-// "my email is a@b.co" would glue its words into one long local part.
+// EmailFromAnswer accepts an email embedded in prose and tolerates spaces
+// accidentally inserted inside the address. Other answers remain usernames.
 func EmailFromAnswer(text string) (string, bool) {
 	if email, ok := ExtractEmail(text); ok {
 		return email, true
 	}
-	collapsed := dropSpace(text)
-	if email, ok := ExtractEmail(collapsed); ok {
-		return email, true
-	}
-	if qqNumberPattern.MatchString(collapsed) {
-		return collapsed + "@qq.com", true
-	}
-	return "", false
-}
-
-// dropSpace removes every space character, including the full-width and
-// no-break ones an IME or a paste leaves inside an address.
-func dropSpace(s string) string {
-	return strings.Map(func(r rune) rune {
+	collapsed := strings.Map(func(r rune) rune {
 		if unicode.IsSpace(r) {
 			return -1
 		}
 		return r
-	}, s)
+	}, text)
+	return ExtractEmail(collapsed)
 }
 
 // ExtractEmail finds the first email-looking token in free text and normalises

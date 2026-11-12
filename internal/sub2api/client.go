@@ -16,7 +16,7 @@ import (
 // matched page has to be back before we can say the email is absent.
 const searchPageBounds = 200
 
-// Client asks sub2api whether an email belongs to a registered account.
+// Client looks up sub2api users by their email or username.
 type Client struct {
 	baseURL   string
 	adminKey  string
@@ -44,55 +44,61 @@ type response struct {
 	Data    struct {
 		Total int `json:"total"`
 		Items []struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			Username string `json:"username"`
+			Status   string `json:"status"`
 		} `json:"items"`
 	} `json:"data"`
 }
 
-// UserExists reports whether email is a registered sub2api account.
+// FindUser looks up a user by an exact email or username and reports whether
+// that user has the active status required for automatic approval.
 //
-// The admin user list has no email filter: `search` is a substring match over
-// several fields, so a hit count above zero proves nothing. Every returned row
-// is compared against the candidate address before it counts.
-func (c *Client) UserExists(ctx context.Context, email string) (bool, error) {
+// The admin user list search is fuzzy, so each returned row is checked against
+// the requested field before it counts.
+func (c *Client) FindUser(ctx context.Context, identifier string, byEmail bool) (bool, bool, error) {
 	q := url.Values{}
-	q.Set("search", email)
+	q.Set("search", identifier)
 	q.Set("page", "1")
 	q.Set("page_size", fmt.Sprint(searchPageBounds))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+c.userRoute+"?"+q.Encode(), nil)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	req.Header.Set("x-api-key", c.adminKey)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("query sub2api: %w", err)
+		return false, false, fmt.Errorf("query sub2api: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return false, fmt.Errorf("read sub2api response: %w", err)
+		return false, false, fmt.Errorf("read sub2api response: %w", err)
 	}
 	var out response
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return false, fmt.Errorf("decode sub2api response: %w (body=%s)", err, truncate(raw))
+		return false, false, fmt.Errorf("decode sub2api response: %w (body=%s)", err, truncate(raw))
 	}
 	if string(out.Code) != "0" {
-		return false, fmt.Errorf("sub2api error http=%d code=%s message=%s", resp.StatusCode, string(out.Code), out.Message)
+		return false, false, fmt.Errorf("sub2api error http=%d code=%s message=%s", resp.StatusCode, string(out.Code), out.Message)
 	}
 	if out.Data.Total > len(out.Data.Items) {
 		// More matches than we fetched: absence cannot be concluded.
-		return false, fmt.Errorf("sub2api search truncated: %d matches, only %d fetched", out.Data.Total, len(out.Data.Items))
+		return false, false, fmt.Errorf("sub2api search truncated: %d matches, only %d fetched", out.Data.Total, len(out.Data.Items))
 	}
 	for _, item := range out.Data.Items {
-		if strings.EqualFold(strings.TrimSpace(item.Email), email) {
-			return true, nil
+		value := item.Username
+		if byEmail {
+			value = item.Email
+		}
+		if strings.EqualFold(strings.TrimSpace(value), identifier) {
+			return true, strings.EqualFold(item.Status, "active"), nil
 		}
 	}
-	return false, nil
+	return false, false, nil
 }
 
 func truncate(b []byte) string {

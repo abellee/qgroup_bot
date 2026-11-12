@@ -29,16 +29,16 @@ func newStub(t *testing.T, body string) (string, *recorded) {
 
 const realEmail = "abellee@example.com"
 
-func TestUserExistsUsesAdminKeyAndExactMatch(t *testing.T) {
-	base, rec := newStub(t, `{"code":0,"message":"success","data":{"total":1,"items":[{"email":"`+realEmail+`"}]}}`)
+func TestFindUserByEmailUsesAdminKeyAndExactMatch(t *testing.T) {
+	base, rec := newStub(t, `{"code":0,"message":"success","data":{"total":1,"items":[{"email":"`+realEmail+`","username":"abel","status":"active"}]}}`)
 	c := New(base, "admin-key", "/api/v1/admin/users", &http.Client{})
 
-	found, err := c.UserExists(context.Background(), realEmail)
+	found, active, err := c.FindUser(context.Background(), realEmail, true)
 	if err != nil {
-		t.Fatalf("UserExists: %v", err)
+		t.Fatalf("FindUser: %v", err)
 	}
-	if !found {
-		t.Error("UserExists = false, want true")
+	if !found || !active {
+		t.Errorf("FindUser = (%v, %v), want (true, true)", found, active)
 	}
 	if got := rec.head.Get("x-api-key"); got != "admin-key" {
 		t.Errorf("x-api-key = %q, want admin-key (sub2api rejects Authorization: Bearer)", got)
@@ -53,7 +53,7 @@ func TestUserExistsUsesAdminKeyAndExactMatch(t *testing.T) {
 
 // The admin search is a substring match over several fields, so rows that are
 // not the requested address must not count as a hit.
-func TestUserExistsRejectsFuzzyNeighbours(t *testing.T) {
+func TestFindUserRejectsFuzzyEmailNeighbours(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
@@ -66,7 +66,7 @@ func TestUserExistsRejectsFuzzyNeighbours(t *testing.T) {
 	for _, c := range cases {
 		base, _ := newStub(t, c.body)
 		cl := New(base, "k", "/api/v1/admin/users", &http.Client{})
-		found, err := cl.UserExists(context.Background(), realEmail)
+		found, _, err := cl.FindUser(context.Background(), realEmail, true)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -76,21 +76,48 @@ func TestUserExistsRejectsFuzzyNeighbours(t *testing.T) {
 	}
 }
 
-func TestUserExistsMatchesCaseAndPadding(t *testing.T) {
-	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":" AbelLee@Example.COM "}]}}`)
+func TestFindUserMatchesCaseAndPadding(t *testing.T) {
+	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":" AbelLee@Example.COM ","status":"active"}]}}`)
 	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
-	found, err := c.UserExists(context.Background(), realEmail)
+	found, active, err := c.FindUser(context.Background(), realEmail, true)
 	if err != nil {
-		t.Fatalf("UserExists: %v", err)
+		t.Fatalf("FindUser: %v", err)
 	}
-	if !found {
-		t.Error("UserExists = false, want a case-insensitive match")
+	if !found || !active {
+		t.Errorf("FindUser = (%v, %v), want an active case-insensitive match", found, active)
+	}
+}
+
+func TestFindUserMatchesUsernameAndReturnsStatus(t *testing.T) {
+	base, rec := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"other@example.com","username":"Abel","status":"disabled"}]}}`)
+	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
+	found, active, err := c.FindUser(context.Background(), "abel", false)
+	if err != nil {
+		t.Fatalf("FindUser: %v", err)
+	}
+	if !found || active {
+		t.Errorf("FindUser = (%v, %v), want (true, false) for disabled account", found, active)
+	}
+	if got := rec.query.Get("search"); got != "abel" {
+		t.Errorf("search = %q, want username", got)
+	}
+}
+
+func TestFindUserDoesNotMatchEmailWhenLookingUpUsername(t *testing.T) {
+	base, _ := newStub(t, `{"code":0,"data":{"total":1,"items":[{"email":"abel","username":"another","status":"active"}]}}`)
+	c := New(base, "k", "/api/v1/admin/users", &http.Client{})
+	found, _, err := c.FindUser(context.Background(), "abel", false)
+	if err != nil {
+		t.Fatalf("FindUser: %v", err)
+	}
+	if found {
+		t.Error("FindUser matched the email field when looking up a username")
 	}
 }
 
 // Anything the client cannot read must surface as an error, never as "not
 // registered", or a transient failure would silently drop a legitimate applicant.
-func TestUserExistsFailsClosed(t *testing.T) {
+func TestFindUserFailsClosed(t *testing.T) {
 	cases := []struct {
 		name string
 		code int
@@ -108,7 +135,7 @@ func TestUserExistsFailsClosed(t *testing.T) {
 			_, _ = w.Write([]byte(c.body))
 		}))
 		cl := New(srv.URL, "k", "/api/v1/admin/users", &http.Client{})
-		found, err := cl.UserExists(context.Background(), realEmail)
+		found, _, err := cl.FindUser(context.Background(), realEmail, true)
 		srv.Close()
 		if err == nil {
 			t.Errorf("%s: no error returned (found=%v)", c.name, found)

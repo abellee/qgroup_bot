@@ -16,20 +16,24 @@ import (
 )
 
 type stubDirectory struct {
-	mu      sync.Mutex
-	calls   []string
-	members map[string]bool
-	err     error
+	mu       sync.Mutex
+	calls    []string
+	byEmail  []bool
+	members  map[string]bool
+	disabled map[string]bool
+	err      error
 }
 
-func (s *stubDirectory) UserExists(_ context.Context, email string) (bool, error) {
+func (s *stubDirectory) FindUser(_ context.Context, identifier string, byEmail bool) (bool, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls = append(s.calls, email)
+	s.calls = append(s.calls, identifier)
+	s.byEmail = append(s.byEmail, byEmail)
 	if s.err != nil {
-		return false, s.err
+		return false, false, s.err
 	}
-	return s.members[email], nil
+	exists := s.members[identifier]
+	return exists, exists && !s.disabled[identifier], nil
 }
 
 func (s *stubDirectory) lookedUp() []string {
@@ -168,8 +172,8 @@ func TestOnlyRegisteredAnswersAreApproved(t *testing.T) {
 	if _, ok := c.Body["reject_reason"]; ok {
 		t.Errorf("approval body carries reject_reason: %v", c.Body)
 	}
-	if got := dir.lookedUp(); len(got) != 2 || got[0] != "real@user.com" || got[1] != "stranger@other.com" {
-		t.Errorf("directory lookups = %v, want the two managed-group emails lower-cased", got)
+	if got := dir.lookedUp(); len(got) != 3 || got[0] != "real@user.com" || got[1] != "stranger@other.com" || got[2] != "让我进来看广告" {
+		t.Errorf("directory lookups = %v, want two emails and the non-email username", got)
 	}
 }
 
@@ -218,54 +222,63 @@ func TestLookupFailureLeavesRequestPending(t *testing.T) {
 	}
 }
 
-// A bare QQ number answer stands for the applicant's @qq.com address.
-func TestBareQQNumberAnswerGetsTheQQDomain(t *testing.T) {
+func TestDisabledUserIsLeftForManualReview(t *testing.T) {
 	stub := &qqStub{}
-	dir := &stubDirectory{members: map[string]bool{"751077517@qq.com": true}}
+	dir := &stubDirectory{
+		members:  map[string]bool{"real@user.com": true},
+		disabled: map[string]bool{"real@user.com": true},
+	}
+	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
+
+	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱", "real@user.com"))
+	if len(stub.reviewed()) != 0 {
+		t.Errorf("disabled user was approved: %+v", stub.reviewed())
+	}
+}
+
+// A bare number is a username, never an inferred QQ email address.
+func TestBareNumberIsLookedUpAsUsername(t *testing.T) {
+	stub := &qqStub{}
+	dir := &stubDirectory{members: map[string]bool{"751077517": true}}
 	svc := NewService(stub.newClient(t), dir, map[string]struct{}{"g1": {}}, nil, discardLogger())
 
 	svc.HandleJoin(context.Background(), qaEvent("g1", "m1", "jr1", "填写注册邮箱自动审批", " 751077517 "))
 	if len(stub.reviewed()) != 1 || stub.reviewed()[0].Op != "approve" {
-		t.Errorf("review calls = %+v, want one approval for the implied @qq.com address", stub.reviewed())
+		t.Errorf("review calls = %+v, want one approval for the registered username", stub.reviewed())
 	}
-	if got := dir.lookedUp(); len(got) != 1 || got[0] != "751077517@qq.com" {
-		t.Errorf("directory lookups = %v, want [751077517@qq.com]", got)
+	if got := dir.lookedUp(); len(got) != 1 || got[0] != "751077517" || dir.byEmail[0] {
+		t.Errorf("directory lookups = %v byEmail=%v, want username [751077517]", got, dir.byEmail)
 	}
 }
 
-func TestEmailFromAnswer(t *testing.T) {
+func TestIdentifierFromEvent(t *testing.T) {
 	cases := []struct {
-		in    string
-		want  string
-		found bool
+		name    string
+		event   *qqbot.JoinRequestEvent
+		want    string
+		byEmail bool
+		found   bool
 	}{
-		{"751077517", "751077517@qq.com", true},
-		{" 751077517\n", "751077517@qq.com", true},
-		{"7510 77517", "751077517@qq.com", true},
-		{" 751077517 ", "751077517@qq.com", true},
-		{"　\t751077517 　", "751077517@qq.com", true},
-		{"751077517@163.com", "751077517@163.com", true},
-		{"7510 77517 @ qq.com", "751077517@qq.com", true},
-		{"我的邮箱是 abc @ example.com", "abc@example.com", true},
-		{"my email is a@b.co, thanks", "a@b.co", true},
-		{"填写的邮箱是 751077517@qq.com 麻烦通过", "751077517@qq.com", true},
-		{"我的QQ是751077517", "", false},
-		{"hello", "", false},
-		{"", "", false},
+		{name: "email answer", event: qaEvent("g1", "m1", "jr1", "邮箱", " Abc@Example.com "), want: "abc@example.com", byEmail: true, found: true},
+		{name: "email in text", event: qaEvent("g1", "m1", "jr1", "邮箱", "my email is a@b.co, thanks"), want: "a@b.co", byEmail: true, found: true},
+		{name: "spaced email", event: qaEvent("g1", "m1", "jr1", "邮箱", "abc @ example.com"), want: "abc@example.com", byEmail: true, found: true},
+		{name: "username", event: qaEvent("g1", "m1", "jr1", "用户名", " Alice "), want: "Alice", found: true},
+		{name: "numeric username", event: qaEvent("g1", "m1", "jr1", "用户名", " 751077517 "), want: "751077517", found: true},
+		{name: "empty", event: qaEvent("g1", "m1", "jr1", "用户名", "  "), found: false},
 	}
 	for _, c := range cases {
-		got, ok := EmailFromAnswer(c.in)
+		got, byEmail, ok := IdentifierFromEvent(c.event)
 		if ok != c.found {
-			t.Errorf("EmailFromAnswer(%q) found = %v, want %v", c.in, ok, c.found)
+			t.Errorf("%s: found = %v, want %v", c.name, ok, c.found)
 			continue
 		}
-		if got != c.want {
-			t.Errorf("EmailFromAnswer(%q) = %q, want %q", c.in, got, c.want)
+		if got != c.want || byEmail != c.byEmail {
+			t.Errorf("%s: got (%q, byEmail=%v), want (%q, byEmail=%v)", c.name, got, byEmail, c.want, c.byEmail)
 		}
 	}
 }
 
-func TestEmailFromEvent(t *testing.T) {
+func TestIdentifierFromEventPrefersEmailAcrossAnswers(t *testing.T) {
 	ev := qaEvent("g1", "m1", "jr1", "q", "请填写你的注册邮箱")
 	ev.VerifyInfo.ReviewQAList = append(ev.VerifyInfo.ReviewQAList, struct {
 		Question string `json:"question"`
@@ -273,14 +286,14 @@ func TestEmailFromEvent(t *testing.T) {
 	}{Question: "第二个问题", Answer: "me@sub2api.com"})
 	ev.VerifyInfo.VerifyMessage = "first@ignored.com"
 
-	got, ok := EmailFromEvent(ev)
-	if !ok || got != "me@sub2api.com" {
-		t.Errorf("EmailFromEvent = %q ok=%v, want me@sub2api.com from the answer that carries it", got, ok)
+	got, byEmail, ok := IdentifierFromEvent(ev)
+	if !ok || !byEmail || got != "me@sub2api.com" {
+		t.Errorf("IdentifierFromEvent = %q byEmail=%v ok=%v, want me@sub2api.com from the answer that carries it", got, byEmail, ok)
 	}
 
-	none := qaEvent("g1", "m1", "jr1", "q", "忘了填")
-	if _, ok := EmailFromEvent(none); ok {
-		t.Error("EmailFromEvent found an email that is not there")
+	none := qaEvent("g1", "m1", "jr1", "q", "")
+	if _, _, ok := IdentifierFromEvent(none); ok {
+		t.Error("IdentifierFromEvent found an identifier that is not there")
 	}
 }
 
